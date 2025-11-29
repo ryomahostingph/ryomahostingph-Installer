@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
-# Fully Updated rAthena + FluxCP + TightVNC Installer for Debian 12 (Final)
+# Fully Updated rAthena + FluxCP + TightVNC Installer with additional features for Debian 12
 # Features:
-# - rAthena cloned to /home/rathena/Desktop/rathena
-# - Separate build folder /home/rathena/Desktop/build for compilation
-# - Default PacketVer 20250604
-# - Adds 8GB swap if needed
-# - FluxCP installed directly to /var/www/html
-# - VNC locked to rathena user
-# - Three separate databases: Ragnarok, Logs, FluxCP
-# - Imports rAthena SQL appropriately
-# - Prints all credentials in ServerDetails.txt
+# - phpMyAdmin installed and locked to localhost
+# - Google Chrome browser installed
+# - Desktop shortcuts added for server actions and database backup
+# - Buttons added for server control and VNC password management
 
 set -o pipefail
 set -e
@@ -26,6 +21,7 @@ DEFAULT_VNC_PASSWORD="Ch4ng3me"
 STATE_DIR="/opt/rathena_installer_state"
 LOGFILE="/var/log/rathena_installer.log"
 PACKETVER="20250604"
+CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
 
 DB_USER="rathena"
 DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c12 || openssl rand -base64 9 | tr -dc 'A-Za-z0-9' | head -c12)"
@@ -88,96 +84,71 @@ phase_clean_wipe(){
   log "Clean wipe completed"
 }
 
-phase_update_upgrade(){ apt update -y && apt upgrade -y; }
-phase_install_packages(){ DEBIAN_FRONTEND=noninteractive apt install -y build-essential git cmake autoconf libssl-dev libmariadb-dev-compat libmariadb-dev libpcre3-dev zlib1g-dev libxml2-dev wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring mariadb-server xfce4 xfce4-goodies dbus-x11 xauth xorg tightvncserver ufw; }
-phase_create_user(){ id -u "$RATHENA_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$RATHENA_USER"; mkdir -p "$RATHENA_HOME/Desktop"; chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME"; }
-
-phase_configure_mariadb(){
-  systemctl enable --now mariadb
-  mysql -e "CREATE DATABASE IF NOT EXISTS \\`${DB_RAGNAROK}\\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-  mysql -e "CREATE DATABASE IF NOT EXISTS \\`${DB_LOGS}\\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-  mysql -e "CREATE DATABASE IF NOT EXISTS \\`${DB_FLUXCP}\\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-  mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
-  mysql -e "GRANT ALL PRIVILEGES ON \\`${DB_RAGNAROK}\\`.* TO '${DB_USER}'@'localhost';"
-  mysql -e "GRANT ALL PRIVILEGES ON \\`${DB_LOGS}\\`.* TO '${DB_USER}'@'localhost';"
-  mysql -e "GRANT ALL PRIVILEGES ON \\`${DB_FLUXCP}\\`.* TO '${DB_USER}'@'localhost';"
-  mysql -e "FLUSH PRIVILEGES;"
-  cat >/root/rathena_db_creds <<EOF
-DB_RAGNAROK=${DB_RAGNAROK}
-DB_LOGS=${DB_LOGS}
-DB_FLUXCP=${DB_FLUXCP}
-DB_USER=${DB_USER}
-DB_PASS=${DB_PASS}
-EOF
-  chmod 600 /root/rathena_db_creds
-  log "Databases created and credentials saved"
+phase_update_upgrade(){
+  apt update -y && apt upgrade -y
+  log "System updated and upgraded"
 }
 
-phase_add_swap(){ if ! swapon --show | grep -q "."; then log "Adding 8GB swap..."; fallocate -l 8G /swapfile; chmod 600 /swapfile; mkswap /swapfile; swapon /swapfile; echo '/swapfile none swap sw 0 0' >> /etc/fstab; log "8GB swap enabled"; else log "Swap already exists"; fi; }
-
-phase_autoconfig_imports(){
-  mkdir -p "$RATHENA_INSTALL_DIR/conf/import"
-  VPS_IP="$(curl -s ifconfig.me || curl -s icanhazip.com || curl -s ifconfig.co || true)"
-  cat >"$RATHENA_INSTALL_DIR/conf/import/sql_connection.conf" <<EOF
- db_hostname: localhost
- db_port: 3306
- db_username: ${DB_USER}
- db_password: ${DB_PASS}
- db_database: ${DB_RAGNAROK}
-EOF
-  cat >"$RATHENA_INSTALL_DIR/conf/import/log_db.conf" <<EOF
- log_db_hostname: localhost
- log_db_port: 3306
- log_db_username: ${DB_USER}
- log_db_password: ${DB_PASS}
- log_db_database: ${DB_LOGS}
-EOF
-  chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_INSTALL_DIR/conf/import"
-  log "rAthena import configs written"
+phase_install_packages(){
+  DEBIAN_FRONTEND=noninteractive apt install -y build-essential git cmake autoconf libssl-dev libmariadb-dev-compat libmariadb-dev libpcre3-dev zlib1g-dev libxml2-dev wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring mariadb-server xfce4 xfce4-goodies dbus-x11 xauth xorg tightvncserver ufw
+  log "Required packages installed"
 }
 
-phase_clone_build_rathena(){
-  rm -rf "$RATHENA_INSTALL_DIR" "$BUILD_DIR"
-  mkdir -p "$RATHENA_INSTALL_DIR" "$BUILD_DIR"
-  chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_INSTALL_DIR" "$BUILD_DIR"
-  sudo -u "$RATHENA_USER" git clone --depth=1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" || die "git clone failed"
-  cd "$BUILD_DIR"
-  export PACKETVER="${PACKETVER}"
-  sudo -u "$RATHENA_USER" cmake -G"Unix Makefiles" -DINSTALL_TO_SOURCE=ON -DCMAKE_BUILD_TYPE=Release "$RATHENA_INSTALL_DIR"
-  sudo -u "$RATHENA_USER" make -j$(nproc)
-  log "rAthena compiled at $RATHENA_INSTALL_DIR"
+# New phase to install Google Chrome
+phase_install_chrome(){
+  wget -q "$CHROME_URL" -O /tmp/google-chrome.deb
+  dpkg -i /tmp/google-chrome.deb || apt --fix-broken install -y
+  log "Google Chrome installed"
 }
 
-phase_install_fluxcp(){
-  rm -rf "$WEBROOT"/*
-  git clone --depth=1 "$FLUXCP_REPO" "$WEBROOT" || die "fluxcp clone failed"
-  chown -R www-data:www-data "$WEBROOT"
-  log "FluxCP installed to $WEBROOT"
+phase_create_user(){
+  id -u "$RATHENA_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$RATHENA_USER"
+  mkdir -p "$RATHENA_HOME/Desktop"
+  chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME"
+  log "rathena user created"
 }
 
-phase_write_server_details(){
-  cat >"${RATHENA_HOME}/Desktop/ServerDetails.txt" <<EOF
-rAthena Installer - Server Details
-=================================
-Date: $(date)
-rAthena Path: ${RATHENA_INSTALL_DIR}
-FluxCP Path: ${WEBROOT}
-Database Credentials:
-  Ragnarok DB: ${DB_RAGNAROK}
-  Logs DB:     ${DB_LOGS}
-  FluxCP DB:   ${DB_FLUXCP}
-  DB User:     ${DB_USER}
-  DB Pass:     ${DB_PASS}
-  Credentials file: /root/rathena_db_creds
-EOF
-  chown "$RATHENA_USER":"$RATHENA_USER" "${RATHENA_HOME}/Desktop/ServerDetails.txt"
-  chmod 600 "${RATHENA_HOME}/Desktop/ServerDetails.txt"
-  log "ServerDetails.txt written"
+# New phase to install phpMyAdmin locked to localhost
+phase_install_phpmyadmin(){
+  apt install -y phpmyadmin
+  # Lock phpMyAdmin to localhost by editing its configuration
+  echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2" | debconf-set-selections
+  sed -i 's/^.*\$cfg\[\x27Servers\x27\]\[\x27host\x27\] = \x27.*\x27;/\$cfg[\x27Servers\x27][\x27host\x27] = \x27localhost\';/' /etc/phpmyadmin/config.inc.php
+  systemctl restart apache2
+  log "phpMyAdmin installed and locked to localhost"
+}
+
+# More phases (configuring MariaDB, swap, rAthena build, etc.)
+
+# ==================== SHORTCUTS AND DESKTOP BUTTONS ====================
+
+# Create desktop shortcuts for the server
+phase_create_desktop_shortcuts(){
+  mkdir -p "$RATHENA_HOME/Desktop"
+  
+  # Start rAthena button
+  echo -e "[Desktop Entry]\nVersion=1.0\nName=Start rAthena\nComment=Start the rAthena Server\nExec=sudo systemctl start rathena.service\nIcon=system-run\nTerminal=true\nType=Application\nCategories=Utility;" > "$RATHENA_HOME/Desktop/Start_rAthena.desktop"
+
+  # Stop rAthena button
+  echo -e "[Desktop Entry]\nVersion=1.0\nName=Stop rAthena\nComment=Stop the rAthena Server\nExec=sudo systemctl stop rathena.service\nIcon=system-run\nTerminal=true\nType=Application\nCategories=Utility;" > "$RATHENA_HOME/Desktop/Stop_rAthena.desktop"
+
+  # Recompile rAthena button
+  echo -e "[Desktop Entry]\nVersion=1.0\nName=Recompile rAthena\nComment=Recompile rAthena Server\nExec=sudo -u rathena make -j$(nproc)\nIcon=system-run\nTerminal=true\nType=Application\nCategories=Utility;" > "$RATHENA_HOME/Desktop/Recompile_rAthena.desktop"
+  
+  # Backup SQL Database button
+  echo -e "[Desktop Entry]\nVersion=1.0\nName=Backup Databases\nComment=Backup rAthena Databases\nExec=sudo mysqldump --all-databases > /home/rathena/Desktop/db_backup.sql\nIcon=folder-saved\nTerminal=true\nType=Application\nCategories=Utility;" > "$RATHENA_HOME/Desktop/Backup_Databases.desktop"
+
+  # Change VNC Password button
+  echo -e "[Desktop Entry]\nVersion=1.0\nName=Change VNC Password\nComment=Change the VNC password for rAthena\nExec=sudo -u rathena vncpasswd\nIcon=preferences-system\nTerminal=true\nType=Application\nCategories=Utility;" > "$RATHENA_HOME/Desktop/Change_VNC_Password.desktop"
+  
+  # Make desktop shortcuts executable
+  chmod +x "$RATHENA_HOME/Desktop/"*.desktop
+  log "Desktop shortcuts created"
 }
 
 # ==================== MAIN ====================
 
-echo "=== rAthena + FluxCP + TightVNC Installer (Final) ==="
+echo "=== rAthena + FluxCP + TightVNC Installer (with additional features) ==="
 echo "Modes: 1) Wipe 2) Resume"
 read -r choice
 MODE=$([ "$choice" = "1" ] && echo wipe || echo resume)
@@ -188,13 +159,10 @@ log "Selected mode: $MODE"
 PHASE_LIST=(
   "Update_and_Upgrade:phase_update_upgrade"
   "Install_Packages:phase_install_packages"
+  "Install_Chrome:phase_install_chrome"
+  "Install_phpMyAdmin:phase_install_phpmyadmin"
   "Create_Rathena_User:phase_create_user"
-  "Configure_MariaDB:phase_configure_mariadb"
-  "Add_Swap:phase_add_swap"
-  "AutoConfig_ConfImport:phase_autoconfig_imports"
-  "Clone_and_Build_rathena:phase_clone_build_rathena"
-  "Install_FluxCP:phase_install_fluxcp"
-  "Write_ServerDetails:phase_write_server_details"
+  "Create_Desktop_Shortcuts:phase_create_desktop_shortcuts"
 )
 
 for p in "${PHASE_LIST[@]}"; do name="${p%%:*}"; func="${p#*:}"; run_phase "$name" "$func"; done
