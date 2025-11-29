@@ -232,6 +232,15 @@ EOF
 }
 
 # -------------------------
+# VNC Fixer Function
+# -------------------------
+run_vnc_fixer(){
+  log "Running VNC password fixer..."
+  vncpasswd
+  log "VNC password fixed."
+}
+
+# -------------------------
 # Phase 11: Setup Systemd Services for rAthena Servers
 # -------------------------
 phase_setup_rathena_services(){
