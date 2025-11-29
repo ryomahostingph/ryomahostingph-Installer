@@ -106,6 +106,14 @@ phase_create_user(){
 }
 
 phase_create_databases(){
+  log "Starting MariaDB service..."
+  systemctl start mariadb
+  for i in {1..10}; do
+    mysqladmin ping >/dev/null 2>&1 && break
+    log "MariaDB not ready yet, waiting 2 seconds..."
+    sleep 2
+  done
+
   log "Creating rAthena databases..."
   mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_RAGNAROK}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
   mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_LOGS}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
