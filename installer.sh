@@ -1,251 +1,248 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-LOG_FILE="/var/log/rathena_installer.log"
-RATHENA_HOME="/home/rathena"
-RATHENA_DESKTOP="$RATHENA_HOME/Desktop/rathena"
+LOGFILE="/var/log/rathena_installer.log"
+RATHENA_USER="rathena"
+RATHENA_HOME="/home/${RATHENA_USER}"
+RATHENA_REPO="https://github.com/rathena/rathena.git"
+RATHENA_INSTALL_DIR="${RATHENA_HOME}/Desktop/rathena"
 WEBROOT="/var/www/html"
-DEFAULT_VNC_PASSWORD="rathena123"
+STATE_DIR="/opt/rathena_installer_state"
+DEFAULT_VNC_PASSWORD="Ch4ng3me"   # used only by vnc_fixer if invoked
+CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+DB_USER="rathena"
+DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c12 || true)"
+DB_RAGNAROK="ragnarok"
+DB_LOGS="ragnarok_logs"
+DB_FLUXCP="fluxcp"
+VNC_FIXER="./vnc_fixer.sh"
 
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
-}
+mkdir -p "$(dirname "$LOGFILE")" "$STATE_DIR"
+touch "$LOGFILE" || true
+chmod 600 "$LOGFILE" 2>/dev/null || true
 
-# =========================================================
-# PHASE 1: CLEAN WIPE
-# =========================================================
-phase_clean_wipe(){
-  log "DESTRUCTIVE CLEAN WIPE - THIS REMOVES rAthena, FluxCP, DBs, VNC CONFIGS."
-  read -p "Type YES to proceed: " confirm
-  [[ "$confirm" != "YES" ]] && { log "Aborted."; exit 1; }
+log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 
-  systemctl stop vncserver@1.service 2>/dev/null || true
-  systemctl disable vncserver@1.service 2>/dev/null || true
-  rm -f /etc/systemd/system/vncserver@1.service
-  rm -f /etc/systemd/system/vncserver@.service
-  systemctl daemon-reload
+# -------------------------
+# Basic checks
+# -------------------------
+[ "$(id -u)" -eq 0 ] || { echo "Run as root"; exit 1; }
 
-  rm -rf "$RATHENA_DESKTOP"
-  rm -rf "$RATHENA_HOME/.vnc"
-  rm -rf "$RATHENA_HOME/.Xauthority"
-  rm -rf "$WEBROOT"/*
-
-  mysql -uroot -e "DROP DATABASE IF EXISTS rathena_main;"
-  mysql -uroot -e "DROP DATABASE IF EXISTS rathena_logs;"
-  mysql -uroot -e "DROP USER IF EXISTS 'rathena'@'localhost';"
-
-  log "Clean wipe completed"
-}
-
-# =========================================================
-# PHASE 2: SYSTEM UPDATE
-# =========================================================
+# -------------------------
+# Helpers / phases
+# -------------------------
 phase_update_upgrade(){
-  log "Updating system packages..."
-  apt-get update -y
-  apt-get upgrade -y
-  log "System updated and upgraded"
+  log "Updating system..."
+  apt update -y && apt upgrade -y
+  log "System updated"
 }
 
-# =========================================================
-# PHASE 3: INSTALL PACKAGES
-# =========================================================
-phase_install_packages(){
-  log "Installing required packages..."
-  apt-get install -y build-essential git cmake autoconf libssl-dev \
-    libmariadb-dev-compat libmariadb-dev libpcre3-dev zlib1g-dev \
-    libxml2-dev wget curl unzip apache2 php php-mysql php-gd php-xml \
-    php-mbstring mariadb-server xfce4 xfce4-goodies dbus-x11 xauth \
-    xorg tightvncserver ufw
-  log "Required packages installed"
+phase_install_packages_minimal(){
+  log "Installing minimal packages (no VNC/GUI)..."
+  DEBIAN_FRONTEND=noninteractive apt install -y \
+    build-essential git cmake autoconf libssl-dev \
+    libmariadb-dev-compat libmariadb-dev libpcre3-dev zlib1g-dev libxml2-dev \
+    wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring mariadb-server \
+    dbus-x11 xauth xorg ufw
+  log "Minimal packages installed"
 }
 
-# =========================================================
-# PHASE 4: USER SETUP
-# =========================================================
 phase_create_rathena_user(){
-  if ! id rathena >/dev/null 2>&1; then
-    useradd -m -s /bin/bash rathena
+  if ! id -u "$RATHENA_USER" >/dev/null 2>&1; then
+    useradd -m -s /bin/bash "$RATHENA_USER"
+    log "Created user $RATHENA_USER"
+  else
+    log "User $RATHENA_USER exists"
   fi
-  log "rathena user created"
+  mkdir -p "$RATHENA_HOME/Desktop"
+  chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME"
 }
 
-# =========================================================
-# PHASE 5: DATABASES
-# =========================================================
 phase_create_databases(){
-  log "Starting MariaDB service..."
+  log "Starting MariaDB and creating DBs"
   systemctl start mariadb
+  for i in {1..10}; do
+    mysqladmin ping >/dev/null 2>&1 && break
+    sleep 1
+  done
 
-  log "Creating rAthena databases..."
-  mysql -uroot <<EOF
-CREATE DATABASE IF NOT EXISTS rathena_main;
-CREATE DATABASE IF NOT EXISTS rathena_logs;
-CREATE USER IF NOT EXISTS 'rathena'@'localhost' IDENTIFIED BY 'rathena';
-GRANT ALL PRIVILEGES ON rathena_main.* TO 'rathena'@'localhost';
-GRANT ALL PRIVILEGES ON rathena_logs.* TO 'rathena'@'localhost';
-FLUSH PRIVILEGES;
-EOF
-  log "Databases and user created for rAthena"
+  mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_RAGNAROK}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_LOGS}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_FLUXCP}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+  mysql -e "GRANT ALL PRIVILEGES ON \`${DB_RAGNAROK}\`.* TO '${DB_USER}'@'localhost';"
+  mysql -e "GRANT ALL PRIVILEGES ON \`${DB_LOGS}\`.* TO '${DB_USER}'@'localhost';"
+  mysql -e "GRANT ALL PRIVILEGES ON \`${DB_FLUXCP}\`.* TO '${DB_USER}'@'localhost';"
+  mysql -e "FLUSH PRIVILEGES;"
+  log "Databases and user created (user: ${DB_USER})"
 }
 
-# =========================================================
-# PHASE 6: PHPMYADMIN
-# =========================================================
 phase_install_phpmyadmin(){
-  log "Configuring phpMyAdmin pre-selections..."
-  echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2" | debconf-set-selections
-  echo "phpmyadmin phpmyadmin/dbconfig-install boolean true" | debconf-set-selections
-  echo "phpmyadmin phpmyadmin/mysql/admin-pass password root" | debconf-set-selections
-  echo "phpmyadmin phpmyadmin/mysql/app-pass password root" | debconf-set-selections
-  apt-get install -y phpmyadmin
-
-  systemctl restart apache2
-  log "phpMyAdmin installed and Apache restarted"
+  log "Installing phpMyAdmin (noninteractive)..."
+  echo "phpmyadmin phpmyadmin/dbconfig-install boolean false" | debconf-set-selections
+  DEBIAN_FRONTEND=noninteractive apt install -y phpmyadmin || true
+  systemctl restart apache2 || true
+  log "phpMyAdmin installed (if package available)"
 }
 
-# =========================================================
-# PHASE 7: CHROME
-# =========================================================
 phase_install_chrome(){
-  wget -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-  dpkg -i /tmp/google-chrome.deb || apt -f install -y
-  log "Google Chrome installed"
+  log "Installing Google Chrome (optional)..."
+  wget -q "$CHROME_URL" -O /tmp/google-chrome.deb || true
+  dpkg -i /tmp/google-chrome.deb || apt --fix-broken install -y || true
+  log "Chrome done"
 }
 
-# =========================================================
-# PHASE 8: AUTOCONFIG IMPORTS
-# =========================================================
-phase_autoconfig_imports(){
-  mkdir -p "$RATHENA_DESKTOP/conf/import"
-  chown -R rathena:rathena "$RATHENA_DESKTOP/conf"
-  log "rAthena import-tmpl configs written"
+phase_clone_rathena(){
+  log "Cloning rAthena into $RATHENA_INSTALL_DIR"
+  rm -rf "$RATHENA_INSTALL_DIR"
+  sudo -u "$RATHENA_USER" git clone "$RATHENA_REPO" "$RATHENA_INSTALL_DIR"
+  chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_INSTALL_DIR"
+  log "rAthena cloned"
 }
 
-# =========================================================
-# PHASE 9: CLEANUP VNC
-# =========================================================
-phase_cleanup_vnc(){
-  log "Cleaning up any old VNC sessions..."
-  pkill -9 Xtightvnc 2>/dev/null || true
-  rm -rf "$RATHENA_HOME/.vnc"
-  rm -f /tmp/.X1-lock
-  rm -f /tmp/.X11-unix/X1
-  log "Old VNC sessions cleaned"
-}
-
-# =========================================================
-# PHASE 10: SETUP VNC (FIXED)
-# =========================================================
-phase_setup_vnc(){
-  log "Configuring TightVNC for rathena user..."
-
-  sudo -u rathena mkdir -p "$RATHENA_HOME/.vnc"
-
-  sudo -u rathena bash -c "echo '$DEFAULT_VNC_PASSWORD' | vncpasswd -f" > "$RATHENA_HOME/.vnc/passwd"
-  chown rathena:rathena "$RATHENA_HOME/.vnc/passwd"
-  chmod 600 "$RATHENA_HOME/.vnc/passwd"
-
-  # xstartup
-  sudo -u rathena tee "$RATHENA_HOME/.vnc/xstartup" >/dev/null <<'EOF'
-#!/bin/bash
-xrdb $HOME/.Xresources
-startxfce4 &
-EOF
-  chmod +x "$RATHENA_HOME/.vnc/xstartup"
-  chown -R rathena:rathena "$RATHENA_HOME/.vnc"
-
-  # Create systemd unit
-  cat >/etc/systemd/system/vncserver@.service <<'EOF'
-[Unit]
-Description=Start TightVNC server at startup
-After=syslog.target network.target
-
-[Service]
-Type=forking
-User=rathena
-PAMName=login
-PIDFile=/home/rathena/.vnc/%H:%i.pid
-Environment=DISPLAY=:%i
-Environment=XAUTHORITY=/home/rathena/.Xauthority
-
-ExecStartPre=/usr/bin/vncserver -kill :%i > /dev/null 2>&1 || true
-ExecStart=/usr/bin/vncserver :%i -geometry 1280x720 -depth 24
-ExecStop=/usr/bin/vncserver -kill :%i
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable vncserver@1.service
-  systemctl restart vncserver@1.service || log "vncserver restart failed"
-
-  log "TightVNC configured (attempted start)."
-}
-
-# =========================================================
-# PHASE 11: COMPILE RATHENA
-# =========================================================
 phase_compile_rathena(){
-  log "Preparing rAthena source..."
-
-  rm -rf "$RATHENA_DESKTOP"
-  sudo -u rathena git clone https://github.com/rathena/rathena.git "$RATHENA_DESKTOP"
-
-  log "No Makefile found. Skipping compilation (source cloned)."
+  log "Attempting to compile rAthena if Makefile exists"
+  cd "$RATHENA_INSTALL_DIR" || return 0
+  # only run make if Makefile present (some branches use cmake/etc)
+  if [ -f Makefile ]; then
+    sudo -u "$RATHENA_USER" make clean || true
+    sudo -u "$RATHENA_USER" make -j"$(nproc)" || log "make failed"
+    log "rAthena compiled"
+  else
+    log "Makefile not found, skipping compile"
+  fi
 }
 
-# =========================================================
-# PHASE 12: INSTALL FLUXCP (WEBROOT)
-# =========================================================
 phase_install_fluxcp(){
-  log "Installing FluxCP directly into /var/www/html ..."
+  log "Installing FluxCP directly into $WEBROOT (will backup existing webroot)"
+  if [ -n "$(ls -A "$WEBROOT" 2>/dev/null || true)" ]; then
+    ts="$(date +%s)"
+    mv "$WEBROOT" "${WEBROOT}.backup.${ts}"
+    mkdir -p "$WEBROOT"
+    log "Existing webroot backed up to ${WEBROOT}.backup.${ts}"
+  fi
 
-  rm -rf "$WEBROOT"/*
   git clone https://github.com/rathena/FluxCP.git "$WEBROOT"
-
   chown -R www-data:www-data "$WEBROOT"
-  log "FluxCP installed to /var/www/html"
+  mkdir -p "$WEBROOT/cache" "$WEBROOT/templates_c" "$WEBROOT/logs" 2>/dev/null || true
+  chown -R www-data:www-data "$WEBROOT"
+  log "FluxCP cloned to $WEBROOT"
 }
 
-# =========================================================
-# PHASE 13: DESKTOP SHORTCUTS
-# =========================================================
-phase_create_desktop_shortcuts(){
+phase_create_shortcuts(){
+  mkdir -p "$RATHENA_HOME/Desktop"
+  cat > "$RATHENA_HOME/Desktop/Recompile_rAthena.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=Recompile rAthena
+Exec=sudo -u ${RATHENA_USER} bash -lc "cd ${RATHENA_INSTALL_DIR} && make -j\$(nproc) || true"
+Terminal=true
+Type=Application
+EOF
+  chown "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/Desktop/Recompile_rAthena.desktop"
+  chmod +x "$RATHENA_HOME/Desktop/Recompile_rAthena.desktop"
   log "Desktop shortcuts created"
 }
 
-# =========================================================
-# START INSTALLER
-# =========================================================
-clear
-echo "=== rAthena + FluxCP + TightVNC Installer (full) ==="
-echo "Modes: 1) Wipe 2) Resume"
-read mode
+phase_cleanup_vnc_artifacts(){
+  log "Removing any VNC artifacts (.vnc, systemd units, pid files) to ensure clean non-VNC install"
+  systemctl stop vncserver@1.service 2>/dev/null || true
+  systemctl disable vncserver@1.service 2>/dev/null || true
+  rm -f /etc/systemd/system/vncserver@.service /etc/systemd/system/vncserver@1.service 2>/dev/null || true
+  rm -rf "$RATHENA_HOME/.vnc" "$RATHENA_HOME/.Xauthority" /tmp/.X*-lock /tmp/.X11-unix/* 2>/dev/null || true
+  systemctl daemon-reload || true
+  log "VNC artifacts removed"
+}
 
-case $mode in
-  1)
-    log "Selected mode: wipe"
-    phase_clean_wipe
-  ;;
-  2)
-    log "Selected mode: resume"
-  ;;
-esac
+# -------------------------
+# VNC module management (menu will call vnc_fixer for full setup)
+# -------------------------
+install_tightvnc_packages(){
+  log "Installing TightVNC + XFCE (optional module)"
+  DEBIAN_FRONTEND=noninteractive apt install -y xfce4 xfce4-goodies dbus-x11 xauth xorg tightvncserver
+  log "TightVNC + XFCE packages installed"
+  # call fixer script if available
+  if [ -x "$VNC_FIXER" ]; then
+    log "Running vnc_fixer for final configuration"
+    bash "$VNC_FIXER" install
+  else
+    log "vnc_fixer not found or not executable: $VNC_FIXER"
+  fi
+}
 
-phase_update_upgrade
-phase_install_packages
-phase_create_rathena_user
-phase_create_databases
-phase_install_phpmyadmin
-phase_install_chrome
-phase_autoconfig_imports
-phase_cleanup_vnc
-phase_setup_vnc
-phase_compile_rathena
-phase_install_fluxcp
-phase_create_desktop_shortcuts
+run_vnc_fixer(){
+  if [ -x "$VNC_FIXER" ]; then
+    bash "$VNC_FIXER" install
+  else
+    echo "vnc_fixer.sh missing or not executable. Create/save vnc_fixer.sh in the same folder and chmod +x it."
+  fi
+}
 
-log "Installer finished (mode=$mode)."
-echo "=== Installation complete! FluxCP installed in /var/www/html ==="
+uninstall_tightvnc(){
+  log "Uninstalling TightVNC module (removes packages, systemd unit & .vnc)"
+  systemctl stop vncserver@1.service 2>/dev/null || true
+  systemctl disable vncserver@1.service 2>/dev/null || true
+  rm -f /etc/systemd/system/vncserver@.service /etc/systemd/system/vncserver@1.service 2>/dev/null || true
+  rm -rf "$RATHENA_HOME/.vnc" "$RATHENA_HOME/.Xauthority" 2>/dev/null || true
+  apt remove --purge -y tightvncserver xfce4 xfce4-goodies dbus-x11 xauth xorg || true
+  apt autoremove -y || true
+  systemctl daemon-reload || true
+  log "TightVNC module removed"
+}
+
+# -------------------------
+# Menu / main flows
+# -------------------------
+main_menu(){
+  while true; do
+    cat <<EOF
+
+=== rAthena + FluxCP Installer (modular) ===
+1) Install rAthena + FluxCP (NO VNC)   <-- recommended first run
+2) Install TightVNC + XFCE (optional)
+3) Run TightVNC fixer only (vnc_fixer.sh)
+4) Uninstall TightVNC module completely
+5) Exit
+EOF
+    read -rp "Choice: " opt
+    case "$opt" in
+      1)
+        log "Selected: Install rAthena + FluxCP (no VNC)"
+        phase_update_upgrade
+        phase_install_packages_minimal
+        phase_create_rathena_user
+        phase_create_databases
+        phase_install_phpmyadmin
+        phase_install_chrome
+        phase_cleanup_vnc_artifacts
+        phase_clone_rathena
+        phase_compile_rathena
+        phase_install_fluxcp
+        phase_create_shortcuts
+        log "Install (no VNC) finished"
+        ;;
+      2)
+        log "Selected: Install TightVNC + XFCE"
+        install_tightvnc_packages
+        ;;
+      3)
+        log "Selected: Run TightVNC fixer only"
+        run_vnc_fixer
+        ;;
+      4)
+        log "Selected: Uninstall TightVNC module"
+        uninstall_tightvnc
+        ;;
+      5)
+        log "Exiting"
+        exit 0
+        ;;
+      *)
+        echo "Invalid"
+        ;;
+    esac
+  done
+}
+
+# run menu
+main_menu
