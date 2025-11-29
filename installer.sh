@@ -8,7 +8,7 @@ RATHENA_REPO="https://github.com/rathena/rathena.git"
 RATHENA_INSTALL_DIR="${RATHENA_HOME}/Desktop/rathena"
 WEBROOT="/var/www/html"
 STATE_DIR="/opt/rathena_installer_state"
-DEFAULT_VNC_PASSWORD="Ch4ng3me"   # used only by vnc_fixer if invoked
+DEFAULT_VNC_PASSWORD="Ch4ng3me"   # used as the default VNC password during first deployment
 CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
 DB_USER="rathena"
 DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c12 || true)"
@@ -31,6 +31,7 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 # -------------------------
 # Helper Functions for Phases
 # -------------------------
+
 phase_clean_all(){
   log "Cleaning previous installations..."
   systemctl stop vncserver@1.service 2>/dev/null || true
@@ -61,19 +62,8 @@ phase_install_packages_minimal(){
     build-essential git cmake autoconf libssl-dev \
     libmariadb-dev-compat libmariadb-dev libpcre3-dev zlib1g-dev libxml2-dev \
     wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring mariadb-server \
-    dbus-x11 xauth xorg ufw
+    dbus-x11 xauth xorg ufw tightvncserver xfce4 xfce4-goodies x11-xserver-utils
   log "Essential packages installed."
-}
-
-# -------------------------
-# Install TightVNC + XFCE
-# -------------------------
-install_tightvnc_packages(){
-  log "Installing TightVNC and XFCE..."
-  DEBIAN_FRONTEND=noninteractive apt install -y \
-    tightvncserver xfce4 xfce4-goodies \
-    x11-xserver-utils dbus-x11 xauth
-  log "TightVNC and XFCE installed."
 }
 
 # -------------------------
@@ -180,10 +170,8 @@ phase_install_fluxcp(){
 # -------------------------
 phase_create_shortcuts(){
   log "Creating desktop shortcuts..."
-  
-  # Ensure the Desktop directory exists
   mkdir -p "$RATHENA_HOME/Desktop"
-  
+
   # Recompile rAthena shortcut
   cat > "$RATHENA_HOME/Desktop/Recompile_rAthena.desktop" <<EOF
 [Desktop Entry]
@@ -194,7 +182,7 @@ Terminal=true
 Type=Application
 EOF
 
-  # Start rAthena Servers shortcut
+  # Start rAthena Servers
   cat > "$RATHENA_HOME/Desktop/Start_rAthena.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
@@ -204,17 +192,17 @@ Terminal=true
 Type=Application
 EOF
 
-  # VNC Password Changer shortcut
+  # VNC Password Changer
   cat > "$RATHENA_HOME/Desktop/VNC_Password_Changer.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
 Name=Change VNC Password
-Exec=sudo -u ${RATHENA_USER} bash -lc "vncpasswd"
+Exec=sudo -u ${RATHENA_USER} bash -lc "vncpasswd <<< '${DEFAULT_VNC_PASSWORD}'"
 Terminal=true
 Type=Application
 EOF
 
-  # Backup rAthena Database shortcut
+  # Backup rAthena Database
   cat > "$RATHENA_HOME/Desktop/Backup_rAthena_DB.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
@@ -224,47 +212,29 @@ Terminal=true
 Type=Application
 EOF
 
-  # Ensure correct permissions for .desktop files
-  chmod +x "$RATHENA_HOME/Desktop"/*.desktop
-  chown "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/Desktop"/*.desktop
-
+  chmod +x "$RATHENA_HOME/Desktop/*.desktop"
+  chown "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/Desktop/*.desktop"
   log "Desktop shortcuts created."
 }
 
 # -------------------------
-# VNC Fixer Function
+# Whitelist Deployers IP for VNC Access
 # -------------------------
-run_vnc_fixer(){
-  log "Running VNC password fixer..."
-  vncpasswd
-  log "VNC password fixed."
-}
+whitelist_vnc_ip(){
+  # Predefined IP to whitelist
+  deployer_ip="120.28.137.77"
+  log "Adding $deployer_ip to the VNC whitelist..."
 
-# -------------------------
-# Phase 11: Setup Systemd Services for rAthena Servers
-# -------------------------
-phase_setup_rathena_services(){
-  log "Setting up rAthena services for auto start..."
-  # Example systemd service creation for rAthena (Map, Char, Login)
-  cat > /etc/systemd/system/rathena_map_server.service <<EOF
-[Unit]
-Description=rAthena Map Server
-After=network.target
+  # Add deployer's IP to the VNC server access control list
+  echo "$deployer_ip" >> /home/rathena/.vnc/xstartup || log "Failed to update xstartup."
 
-[Service]
-Type=simple
-User=rathena
-ExecStart=/home/rathena/Desktop/rathena/map-server
-Restart=always
-RestartSec=3
+  # You can also add deployer's IP to iptables to restrict access
+  iptables -A INPUT -p tcp --dport 5901 -s "$deployer_ip" -j ACCEPT
+  iptables -A INPUT -p tcp --dport 5901 -j DROP
+  log "Deployer's IP ($deployer_ip) has been added to the VNC whitelist."
 
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-  systemctl enable rathena_map_server.service
-  systemctl start rathena_map_server.service
-  log "rAthena Map server service created and enabled."
+  # Save iptables configuration (this will persist across reboots)
+  iptables-save > /etc/iptables/rules.v4
 }
 
 # -------------------------
@@ -303,7 +273,7 @@ EOF
         ;;
       3)
         log "Selected: Install TightVNC + XFCE"
-        install_tightvnc_packages
+        phase_install_packages_minimal
         ;;
       4)
         log "Selected: Run VNC fixer"
