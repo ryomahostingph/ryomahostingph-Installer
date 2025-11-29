@@ -75,9 +75,9 @@ phase_clean_wipe(){
   systemctl disable rathena-*.service vncserver@:1.service 2>/dev/null || true
   rm -f /etc/systemd/system/rathena-*.service /etc/systemd/system/vncserver@.service /usr/local/bin/rathena_helpers/* /usr/local/bin/rathena_start_*.sh || true
   rm -rf "$RATHENA_INSTALL_DIR" "${RATHENA_INSTALL_DIR}.backup" "$BUILD_DIR" "$WEBROOT" "$RATHENA_HOME/.vnc" /root/rathena_db_creds /root/rathena_db_backups /var/log/rathena || true
-  mysql -e "DROP DATABASE IF EXISTS \\`${DB_RAGNAROK}\\`;" 2>/dev/null || true
-  mysql -e "DROP DATABASE IF EXISTS \\`${DB_LOGS}\\`;" 2>/dev/null || true
-  mysql -e "DROP DATABASE IF EXISTS \\`${DB_FLUXCP}\\`;" 2>/dev/null || true
+  mysql -e "DROP DATABASE IF EXISTS \`${DB_RAGNAROK}\`;" 2>/dev/null || true
+  mysql -e "DROP DATABASE IF EXISTS \`${DB_LOGS}\`;" 2>/dev/null || true
+  mysql -e "DROP DATABASE IF EXISTS \`${DB_FLUXCP}\`;" 2>/dev/null || true
   mysql -e "DROP USER IF EXISTS '${DB_USER}'@'localhost';" 2>/dev/null || true
   rm -rf "$STATE_DIR" || true
   mkdir -p "$STATE_DIR"
@@ -94,7 +94,6 @@ phase_install_packages(){
   log "Required packages installed"
 }
 
-# New phase to install Google Chrome
 phase_install_chrome(){
   wget -q "$CHROME_URL" -O /tmp/google-chrome.deb
   dpkg -i /tmp/google-chrome.deb || apt --fix-broken install -y
@@ -108,58 +107,100 @@ phase_create_user(){
   log "rathena user created"
 }
 
-# New phase to install phpMyAdmin locked to localhost
 phase_install_phpmyadmin(){
-  apt install -y phpmyadmin
-  # Lock phpMyAdmin to localhost by editing its configuration
   echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2" | debconf-set-selections
-  sed -i 's/^.*\$cfg\[\x27Servers\x27\]\[\x27host\x27\] = \x27.*\x27;/\$cfg[\x27Servers\x27][\x27host\x27] = \x27localhost\';/' /etc/phpmyadmin/config.inc.php
+  apt install -y phpmyadmin
+  sed -i "s/^\(\$cfg\['Servers'\]\['host'\] = \).*\$/\1'localhost';/" /etc/phpmyadmin/config.inc.php
   systemctl restart apache2
   log "phpMyAdmin installed and locked to localhost"
 }
 
-# Fix the import directory path to the correct location
 phase_autoconfig_imports(){
   mkdir -p "$RATHENA_INSTALL_DIR/conf/import-tmpl"
   VPS_IP="$(curl -s ifconfig.me || curl -s icanhazip.com || curl -s ifconfig.co || true)"
   cat >"$RATHENA_INSTALL_DIR/conf/import-tmpl/sql_connection.conf" <<EOF
- db_hostname: localhost
- db_port: 3306
- db_username: ${DB_USER}
- db_password: ${DB_PASS}
- db_database: ${DB_RAGNAROK}
+db_hostname: localhost
+db_port: 3306
+db_username: ${DB_USER}
+db_password: ${DB_PASS}
+db_database: ${DB_RAGNAROK}
 EOF
+
   cat >"$RATHENA_INSTALL_DIR/conf/import-tmpl/log_db.conf" <<EOF
- log_db_hostname: localhost
- log_db_port: 3306
- log_db_username: ${DB_USER}
- log_db_password: ${DB_PASS}
- log_db_database: ${DB_LOGS}
+log_db_hostname: localhost
+log_db_port: 3306
+log_db_username: ${DB_USER}
+log_db_password: ${DB_PASS}
+log_db_database: ${DB_LOGS}
 EOF
+
   chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_INSTALL_DIR/conf/import-tmpl"
   log "rAthena import configs written"
 }
 
-# Create desktop shortcuts for the server
 phase_create_desktop_shortcuts(){
   mkdir -p "$RATHENA_HOME/Desktop"
-  
-  # Start rAthena button
-  echo -e "[Desktop Entry]\nVersion=1.0\nName=Start rAthena\nComment=Start the rAthena Server\nExec=sudo systemctl start rathena.service\nIcon=system-run\nTerminal=true\nType=Application\nCategories=Utility;" > "$RATHENA_HOME/Desktop/Start_rAthena.desktop"
 
-  # Stop rAthena button
-  echo -e "[Desktop Entry]\nVersion=1.0\nName=Stop rAthena\nComment=Stop the rAthena Server\nExec=sudo systemctl stop rathena.service\nIcon=system-run\nTerminal=true\nType=Application\nCategories=Utility;" > "$RATHENA_HOME/Desktop/Stop_rAthena.desktop"
+  cat > "$RATHENA_HOME/Desktop/Start_rAthena.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=Start rAthena
+Comment=Start the rAthena Server
+Exec=sudo systemctl start rathena.service
+Icon=system-run
+Terminal=true
+Type=Application
+Categories=Utility;
+EOF
 
-  # Recompile rAthena button
-  echo -e "[Desktop Entry]\nVersion=1.0\nName=Recompile rAthena\nComment=Recompile rAthena Server\nExec=sudo -u rathena make -j$(nproc)\nIcon=system-run\nTerminal=true\nType=Application\nCategories=Utility;" > "$RATHENA_HOME/Desktop/Recompile_rAthena.desktop"
-  
-  # Backup SQL Database button
-  echo -e "[Desktop Entry]\nVersion=1.0\nName=Backup Databases\nComment=Backup rAthena Databases\nExec=sudo mysqldump --all-databases > /home/rathena/Desktop/db_backup.sql\nIcon=folder-saved\nTerminal=true\nType=Application\nCategories=Utility;" > "$RATHENA_HOME/Desktop/Backup_Databases.desktop"
+  cat > "$RATHENA_HOME/Desktop/Stop_rAthena.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=Stop rAthena
+Comment=Stop the rAthena Server
+Exec=sudo systemctl stop rathena.service
+Icon=system-run
+Terminal=true
+Type=Application
+Categories=Utility;
+EOF
 
-  # Change VNC Password button
-  echo -e "[Desktop Entry]\nVersion=1.0\nName=Change VNC Password\nComment=Change the VNC password for rAthena\nExec=sudo -u rathena vncpasswd\nIcon=preferences-system\nTerminal=true\nType=Application\nCategories=Utility;" > "$RATHENA_HOME/Desktop/Change_VNC_Password.desktop"
-  
-  # Make desktop shortcuts executable
+  cat > "$RATHENA_HOME/Desktop/Recompile_rAthena.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=Recompile rAthena
+Comment=Recompile rAthena Server
+Exec=sudo -u rathena make -j$(nproc)
+Icon=system-run
+Terminal=true
+Type=Application
+Categories=Utility;
+EOF
+
+  cat > "$RATHENA_HOME/Desktop/Backup_Databases.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=Backup Databases
+Comment=Backup rAthena Databases
+Exec=sudo mysqldump --all-databases > /home/rathena/Desktop/db_backup.sql
+Icon=folder-saved
+Terminal=true
+Type=Application
+Categories=Utility;
+EOF
+
+  cat > "$RATHENA_HOME/Desktop/Change_VNC_Password.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=Change VNC Password
+Comment=Change the VNC password for rAthena
+Exec=sudo -u rathena vncpasswd
+Icon=preferences-system
+Terminal=true
+Type=Application
+Categories=Utility;
+EOF
+
   chmod +x "$RATHENA_HOME/Desktop/"*.desktop
   log "Desktop shortcuts created"
 }
