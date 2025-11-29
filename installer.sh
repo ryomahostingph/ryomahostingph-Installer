@@ -118,9 +118,27 @@ phase_install_phpmyadmin(){
   log "phpMyAdmin installed and locked to localhost"
 }
 
-# More phases (configuring MariaDB, swap, rAthena build, etc.)
-
-# ==================== SHORTCUTS AND DESKTOP BUTTONS ====================
+# Fix the import directory path to the correct location
+phase_autoconfig_imports(){
+  mkdir -p "$RATHENA_INSTALL_DIR/conf/import-tmpl"
+  VPS_IP="$(curl -s ifconfig.me || curl -s icanhazip.com || curl -s ifconfig.co || true)"
+  cat >"$RATHENA_INSTALL_DIR/conf/import-tmpl/sql_connection.conf" <<EOF
+ db_hostname: localhost
+ db_port: 3306
+ db_username: ${DB_USER}
+ db_password: ${DB_PASS}
+ db_database: ${DB_RAGNAROK}
+EOF
+  cat >"$RATHENA_INSTALL_DIR/conf/import-tmpl/log_db.conf" <<EOF
+ log_db_hostname: localhost
+ log_db_port: 3306
+ log_db_username: ${DB_USER}
+ log_db_password: ${DB_PASS}
+ log_db_database: ${DB_LOGS}
+EOF
+  chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_INSTALL_DIR/conf/import-tmpl"
+  log "rAthena import configs written"
+}
 
 # Create desktop shortcuts for the server
 phase_create_desktop_shortcuts(){
