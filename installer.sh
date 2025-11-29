@@ -2,14 +2,14 @@
 # Fully Updated rAthena + FluxCP + TightVNC Installer for Debian 12 (Final)
 # Features:
 # - rAthena cloned to /home/rathena/Desktop/rathena
-# - Separate build folder for CMake
+# - Separate build folder /home/rathena/Desktop/build for compilation
 # - Default PacketVer 20250604
 # - Adds 8GB swap if needed
-# - FluxCP cloned from official repo
+# - FluxCP installed directly to /var/www/html
 # - VNC locked to rathena user
 # - Three separate databases: Ragnarok, Logs, FluxCP
 # - Imports rAthena SQL appropriately
-# - Prints all DB credentials in ServerDetails.txt
+# - Prints all credentials in ServerDetails.txt
 
 set -o pipefail
 set -e
@@ -19,8 +19,9 @@ RATHENA_USER="rathena"
 RATHENA_HOME="/home/${RATHENA_USER}"
 RATHENA_REPO="https://github.com/rathena/rathena.git"
 FLUXCP_REPO="https://github.com/rathena/FluxCP.git"
-WEBROOT="/var/www/fluxcp"
+WEBROOT="/var/www/html"
 RATHENA_INSTALL_DIR="${RATHENA_HOME}/Desktop/rathena"
+BUILD_DIR="${RATHENA_HOME}/Desktop/build"
 DEFAULT_VNC_PASSWORD="Ch4ng3me"
 STATE_DIR="/opt/rathena_installer_state"
 LOGFILE="/var/log/rathena_installer.log"
@@ -41,7 +42,6 @@ die(){ echo "FATAL: $*" | tee -a "$LOGFILE"; exit 1; }
 [ "$EUID" -ne 0 ] && die "Please run as root (sudo)"
 mkdir -p "$(dirname "$LOGFILE")" "$STATE_DIR"
 touch "$LOGFILE"; chmod 600 "$LOGFILE"
-
 phase_ok(){ [ -f "${STATE_DIR}/$1.ok" ]; }
 phase_mark(){ touch "${STATE_DIR}/$1.ok"; log "PHASE OK: $1"; }
 
@@ -78,7 +78,7 @@ phase_clean_wipe(){
   systemctl stop rathena-*.service vncserver@:1.service apache2 mariadb 2>/dev/null || true
   systemctl disable rathena-*.service vncserver@:1.service 2>/dev/null || true
   rm -f /etc/systemd/system/rathena-*.service /etc/systemd/system/vncserver@.service /usr/local/bin/rathena_helpers/* /usr/local/bin/rathena_start_*.sh || true
-  rm -rf "$RATHENA_INSTALL_DIR" "${RATHENA_INSTALL_DIR}.backup" "$WEBROOT" "$RATHENA_HOME/.vnc" /root/rathena_db_creds /root/rathena_db_backups /var/log/rathena || true
+  rm -rf "$RATHENA_INSTALL_DIR" "${RATHENA_INSTALL_DIR}.backup" "$BUILD_DIR" "$WEBROOT" "$RATHENA_HOME/.vnc" /root/rathena_db_creds /root/rathena_db_backups /var/log/rathena || true
   mysql -e "DROP DATABASE IF EXISTS \\`${DB_RAGNAROK}\\`;" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \\`${DB_LOGS}\\`;" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \\`${DB_FLUXCP}\\`;" 2>/dev/null || true
@@ -137,19 +137,23 @@ EOF
 }
 
 phase_clone_build_rathena(){
-  [ -d "$RATHENA_INSTALL_DIR" ] && rm -rf "$RATHENA_INSTALL_DIR"
-  mkdir -p "$RATHENA_INSTALL_DIR"; chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_INSTALL_DIR"
+  rm -rf "$RATHENA_INSTALL_DIR" "$BUILD_DIR"
+  mkdir -p "$RATHENA_INSTALL_DIR" "$BUILD_DIR"
+  chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_INSTALL_DIR" "$BUILD_DIR"
   sudo -u "$RATHENA_USER" git clone --depth=1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" || die "git clone failed"
-  cd "$RATHENA_INSTALL_DIR"
-  mkdir -p build; cd build
+  cd "$BUILD_DIR"
   export PACKETVER="${PACKETVER}"
-  log "Compiling rAthena with PacketVer $PACKETVER"
-  sudo -u "$RATHENA_USER" cmake -G"Unix Makefiles" -DINSTALL_TO_SOURCE=ON -DCMAKE_BUILD_TYPE=Release ..
+  sudo -u "$RATHENA_USER" cmake -G"Unix Makefiles" -DINSTALL_TO_SOURCE=ON -DCMAKE_BUILD_TYPE=Release "$RATHENA_INSTALL_DIR"
   sudo -u "$RATHENA_USER" make -j$(nproc)
   log "rAthena compiled at $RATHENA_INSTALL_DIR"
 }
 
-phase_install_fluxcp(){ [ -d "$WEBROOT" ] && rm -rf "$WEBROOT"; mkdir -p "$WEBROOT"; git clone --depth=1 "$FLUXCP_REPO" "$WEBROOT" || die "fluxcp clone failed"; chown -R www-data:www-data "$WEBROOT"; log "FluxCP installed to $WEBROOT"; }
+phase_install_fluxcp(){
+  rm -rf "$WEBROOT"/*
+  git clone --depth=1 "$FLUXCP_REPO" "$WEBROOT" || die "fluxcp clone failed"
+  chown -R www-data:www-data "$WEBROOT"
+  log "FluxCP installed to $WEBROOT"
+}
 
 phase_write_server_details(){
   cat >"${RATHENA_HOME}/Desktop/ServerDetails.txt" <<EOF
