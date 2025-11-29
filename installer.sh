@@ -66,6 +66,17 @@ phase_install_packages_minimal(){
 }
 
 # -------------------------
+# Install TightVNC + XFCE
+# -------------------------
+install_tightvnc_packages(){
+  log "Installing TightVNC and XFCE..."
+  DEBIAN_FRONTEND=noninteractive apt install -y \
+    tightvncserver xfce4 xfce4-goodies \
+    x11-xserver-utils dbus-x11 xauth
+  log "TightVNC and XFCE installed."
+}
+
+# -------------------------
 # Phase 3: Create rAthena User and Directories
 # -------------------------
 phase_create_rathena_user(){
@@ -267,7 +278,6 @@ EOF
         log "Selected: Clean All"
         phase_clean_all
         ;;
-
       2)
         log "Selected: Install rAthena + FluxCP"
         phase_update_upgrade
@@ -282,27 +292,22 @@ EOF
         phase_create_shortcuts
         log "Install finished"
         ;;
-
       3)
         log "Selected: Install TightVNC + XFCE"
         install_tightvnc_packages
         ;;
-
       4)
         log "Selected: Run VNC fixer"
         run_vnc_fixer
         ;;
-
       5)
         log "Selected: Setup rAthena Services"
         phase_setup_rathena_services
         ;;
-
       6)
         log "Exiting"
         exit 0
         ;;
-
       *)
         echo "Invalid option"
         ;;
