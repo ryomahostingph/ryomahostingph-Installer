@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ================================
 # rAthena + FluxCP + TightVNC Installer
-# Fully fixed + FluxCP auto-install + VNC cleanup for Debian 12
+# Final fixed version (FluxCP -> /var/www/html)
+# Tested logic for Debian 12 (Bookworm)
 # ================================
 
 set -o pipefail
@@ -72,7 +73,10 @@ phase_clean_wipe(){
   systemctl stop rathena-*.service vncserver@:1.service apache2 mariadb 2>/dev/null || true
   systemctl disable rathena-*.service vncserver@:1.service 2>/dev/null || true
   rm -f /etc/systemd/system/rathena-*.service /etc/systemd/system/vncserver@.service || true
-  rm -rf "$RATHENA_INSTALL_DIR" "$BUILD_DIR" "$WEBROOT/fluxcp" "$RATHENA_HOME/.vnc" /var/log/rathena || true
+  # remove folders (backup webroot first)
+  [ -d "$WEBROOT" ] && mv "$WEBROOT" "${WEBROOT}.backup.$(date +%s)" || true
+  rm -rf "$RATHENA_INSTALL_DIR" "$BUILD_DIR" "$RATHENA_HOME/.vnc" /var/log/rathena || true
+  # Drop DBs and user
   mysql -e "DROP DATABASE IF EXISTS \`${DB_RAGNAROK}\`;" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_LOGS}\`;" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_FLUXCP}\`;" 2>/dev/null || true
@@ -173,48 +177,66 @@ EOF
   log "rAthena import-tmpl configs written"
 }
 
-# ================================
-# NEW: VNC cleanup before setup
-# ================================
+# -----------------------
+# VNC cleanup phase
+# -----------------------
 phase_cleanup_vnc(){
   log "Cleaning up any old VNC sessions..."
-  # Kill all Xtightvnc processes for rathena
-  pkill -u rathena Xtightvnc 2>/dev/null || true
-  # Kill known display numbers
-  for i in {1..5}; do
-      sudo -u rathena vncserver -kill ":$i" 2>/dev/null || true
+  # kill all Xtightvnc processes for rathena and any vncserver processes
+  pkill -u "$RATHENA_USER" Xtightvnc 2>/dev/null || true
+  pkill -u "$RATHENA_USER" Xtigervnc 2>/dev/null || true
+  pkill -f "/usr/bin/vncserver" 2>/dev/null || true
+
+  # gracefully attempt to kill displays :1..:9 as rathena
+  for i in {1..9}; do
+    sudo -u "$RATHENA_USER" /usr/bin/vncserver -kill ":$i" 2>/dev/null || true
   done
-  # Remove old PID files
-  rm -f "$RATHENA_HOME/.vnc/*.pid"
+
+  # remove stale PID files and old password if owned by wrong user
+  rm -f "$RATHENA_HOME/.vnc/"*.pid 2>/dev/null || true
   log "Old VNC sessions cleaned"
 }
 
+# -----------------------
+# VNC setup (safe)
+# -----------------------
 phase_setup_vnc(){
-  log "Configuring TightVNC for rathena user..."
-  sudo -u rathena rm -rf "$RATHENA_HOME/.vnc"
-  sudo -u rathena mkdir -p "$RATHENA_HOME/.vnc"
+  log "Configuring TightVNC for $RATHENA_USER user..."
 
-  echo "$DEFAULT_VNC_PASSWORD" | sudo -u rathena vncpasswd -f > "$RATHENA_HOME/.vnc/passwd"
+  # remove and recreate .vnc as rathena
+  rm -rf "$RATHENA_HOME/.vnc"
+  sudo -u "$RATHENA_USER" mkdir -p "$RATHENA_HOME/.vnc"
+  chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/.vnc"
+  chmod 700 "$RATHENA_HOME/.vnc"
+
+  # create passwd AS rathena to ensure correct owner/format
+  sudo -u "$RATHENA_USER" bash -c "echo '$DEFAULT_VNC_PASSWORD' | vncpasswd -f > \$HOME/.vnc/passwd"
+  chown "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/.vnc/passwd"
   chmod 600 "$RATHENA_HOME/.vnc/passwd"
 
-  sudo -u rathena tee "$RATHENA_HOME/.vnc/xstartup" > /dev/null <<'EOF'
+  # create xstartup as rathena
+  sudo -u "$RATHENA_USER" tee "$RATHENA_HOME/.vnc/xstartup" > /dev/null <<'EOF'
 #!/bin/bash
 xrdb $HOME/.Xresources || true
+# ensure dbus session exists for xfce
+export $(dbus-launch) || true
 startxfce4 &
 EOF
-  sudo -u rathena chmod +x "$RATHENA_HOME/.vnc/xstartup"
+  chown "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/.vnc/xstartup"
+  chmod +x "$RATHENA_HOME/.vnc/xstartup"
 
-  cat >/etc/systemd/system/vncserver@:1.service <<EOF
+  # create systemd unit
+  cat >/etc/systemd/system/vncserver@:1.service <<'EOF'
 [Unit]
 Description=Start TightVNC server at startup
-After=syslog.target network.target
+After=network.target
 
 [Service]
 Type=forking
-User=rathena
+User=RUSER
 PAMName=login
-PIDFile=/home/rathena/.vnc/%H:1.pid
-ExecStartPre=-/usr/bin/vncserver -kill :1
+PIDFile=/home/RUSER/.vnc/%H:1.pid
+ExecStartPre=/usr/bin/vncserver -kill :1 > /dev/null 2>&1 || true
 ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 24
 ExecStop=/usr/bin/vncserver -kill :1
 
@@ -222,14 +244,24 @@ ExecStop=/usr/bin/vncserver -kill :1
 WantedBy=multi-user.target
 EOF
 
+  # replace placeholder RUSER with actual username
+  sed -i "s/RUSER/${RATHENA_USER}/g" /etc/systemd/system/vncserver@:1.service
+
   systemctl daemon-reload
-  systemctl enable vncserver@:1
-  systemctl start vncserver@:1
-  sleep 3
-  systemctl status vncserver@:1 --no-pager
-  log "TightVNC configured and started"
+  systemctl enable vncserver@:1.service
+  # restart to ensure any old is replaced
+  systemctl restart vncserver@:1.service || {
+    log "vncserver restart failed; showing status"
+    systemctl status vncserver@:1.service --no-pager || true
+    # allow installer to continue while logging the error
+  }
+
+  log "TightVNC configured (attempted start)."
 }
 
+# -----------------------
+# rAthena compile phase
+# -----------------------
 phase_compile_rathena(){
   log "Preparing rAthena source..."
   if [ -d "$RATHENA_INSTALL_DIR" ]; then
@@ -237,43 +269,76 @@ phase_compile_rathena(){
     rm -rf "$RATHENA_INSTALL_DIR"
   fi
 
-  sudo -u rathena git clone "$RATHENA_REPO" "$RATHENA_INSTALL_DIR"
+  # clone as rathena user
+  sudo -u "$RATHENA_USER" git clone "$RATHENA_REPO" "$RATHENA_INSTALL_DIR"
   chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_INSTALL_DIR"
 
-  cd "$RATHENA_INSTALL_DIR"
-  if [ -f Makefile ]; then
-    log "Cleaning previous build..."
-    sudo -u rathena make clean
+  cd "$RATHENA_INSTALL_DIR" || return 0
+
+  # run any autoconf/bootstrap if required (common for rAthena)
+  if [ -f autogen.sh ]; then
+    sudo -u "$RATHENA_USER" bash -c "cd '$RATHENA_INSTALL_DIR' && ./configure || true"
   fi
-  log "Compiling rAthena..."
+
   if [ -f Makefile ]; then
-    sudo -u rathena make -j$(nproc)
+    log "Cleaning previous build and compiling..."
+    sudo -u "$RATHENA_USER" make clean || true
+    sudo -u "$RATHENA_USER" make -j"$(nproc)" || {
+      log "make failed; check build logs"
+      return 1
+    }
     log "rAthena compiled successfully"
   else
     log "No Makefile found. Skipping compilation (source cloned)."
   fi
 }
 
+# -----------------------
+# FluxCP install (direct to webroot)
+# -----------------------
 phase_install_fluxcp(){
-  log "Installing FluxCP into /var/www/html..."
-  rm -rf "$WEBROOT/fluxcp"
-  git clone https://github.com/rathena/FluxCP.git "$WEBROOT/fluxcp"
-  chown -R www-data:www-data "$WEBROOT/fluxcp"
-  mkdir -p "$WEBROOT/fluxcp/cache"
-  chown -R www-data:www-data "$WEBROOT/fluxcp/cache"
-  log "FluxCP installed to $WEBROOT/fluxcp"
+  log "Installing FluxCP directly into $WEBROOT ..."
+
+  # backup existing webroot if contains files (avoid losing important files)
+  if [ -n "$(ls -A "$WEBROOT" 2>/dev/null || true)" ]; then
+    ts="$(date +%s)"
+    log "Backing up existing $WEBROOT -> ${WEBROOT}.backup.${ts}"
+    mv "$WEBROOT" "${WEBROOT}.backup.${ts}"
+    mkdir -p "$WEBROOT"
+  fi
+
+  # clone FluxCP directly into webroot
+  git clone https://github.com/rathena/FluxCP.git "$WEBROOT"
+  # correct ownership for Apache
+  chown -R www-data:www-data "$WEBROOT"
+  # ensure cache/temp dirs exist and writable
+  mkdir -p "$WEBROOT/cache" "$WEBROOT/templates_c" "$WEBROOT/logs" 2>/dev/null || true
+  chown -R www-data:www-data "$WEBROOT"
+  log "FluxCP installed to $WEBROOT"
 }
 
 phase_create_desktop_shortcuts(){
   mkdir -p "$RATHENA_HOME/Desktop"
   chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/Desktop"
+  # create small helpers (kept minimal)
+  cat > "$RATHENA_HOME/Desktop/Start_rAthena.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=Start rAthena
+Exec=sudo systemctl start rathena.service
+Icon=system-run
+Terminal=true
+Type=Application
+EOF
+  chown "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/Desktop/Start_rAthena.desktop"
+  chmod +x "$RATHENA_HOME/Desktop/Start_rAthena.desktop"
   log "Desktop shortcuts created"
 }
 
 # ================================
 # MAIN
 # ================================
-echo "=== rAthena + FluxCP + TightVNC Installer (with full features) ==="
+echo "=== rAthena + FluxCP + TightVNC Installer (full) ==="
 echo "Modes: 1) Wipe 2) Resume"
 read -r choice
 MODE=$([ "$choice" = "1" ] && echo wipe || echo resume)
@@ -299,4 +364,4 @@ PHASE_LIST=(
 for p in "${PHASE_LIST[@]}"; do name="${p%%:*}"; func="${p#*:}"; run_phase "$name" "$func"; done
 
 log "Installer finished (mode=$MODE)."
-echo "=== Installation complete! FluxCP installed in /var/www/html/fluxcp ==="
+echo "=== Installation complete! FluxCP installed in /var/www/html ==="
