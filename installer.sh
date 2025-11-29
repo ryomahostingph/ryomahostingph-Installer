@@ -76,7 +76,7 @@ phase_clean_wipe(){
   log "Clean wipe completed"
 }
 phase_update_upgrade(){ apt update -y && apt upgrade -y; }
-phase_install_packages(){ DEBIAN_FRONTEND=noninteractive apt install -y build-essential git cmake autoconf libssl-dev libmysqlclient-dev libpcre3-dev zlib1g-dev libxml2-dev wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring mariadb-server xfce4 xfce4-goodies dbus-x11 xauth xorg tightvncserver ufw; }
+phase_install_packages(){ DEBIAN_FRONTEND=noninteractive apt install -y build-essential git cmake autoconf libssl-dev libmariadb-dev-compat libmariadb-dev libpcre3-dev zlib1g-dev libxml2-dev wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring mariadb-server xfce4 xfce4-goodies dbus-x11 xauth xorg tightvncserver ufw; }
 phase_create_user(){ id -u "$RATHENA_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$RATHENA_USER"; mkdir -p "$RATHENA_HOME/Desktop"; chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME"; }
 phase_configure_mariadb(){ systemctl enable --now mariadb; DB_PASS="$(random_pass)"; mysql -e "CREATE DATABASE IF NOT EXISTS \\`${DB_NAME}\\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"; mysql -e "GRANT ALL PRIVILEGES ON \\`${DB_NAME}\\`.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;"; cat >/root/rathena_db_creds <<EOF
 DB_NAME=${DB_NAME}
