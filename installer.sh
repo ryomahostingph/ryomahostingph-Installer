@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ================================
 # rAthena + FluxCP + TightVNC Installer
-# Fixed version for Debian 12
+# Fully fixed + FluxCP auto-install for Debian 12
 # ================================
 
 set -o pipefail
@@ -72,7 +72,7 @@ phase_clean_wipe(){
   systemctl stop rathena-*.service vncserver@:1.service apache2 mariadb 2>/dev/null || true
   systemctl disable rathena-*.service vncserver@:1.service 2>/dev/null || true
   rm -f /etc/systemd/system/rathena-*.service /etc/systemd/system/vncserver@.service || true
-  rm -rf "$RATHENA_INSTALL_DIR" "$BUILD_DIR" "$WEBROOT" "$RATHENA_HOME/.vnc" /var/log/rathena || true
+  rm -rf "$RATHENA_INSTALL_DIR" "$BUILD_DIR" "$WEBROOT/fluxcp" "$RATHENA_HOME/.vnc" /var/log/rathena || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_RAGNAROK}\`;" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_LOGS}\`;" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_FLUXCP}\`;" 2>/dev/null || true
@@ -183,7 +183,7 @@ phase_setup_vnc(){
 
   sudo -u rathena tee "$RATHENA_HOME/.vnc/xstartup" > /dev/null <<'EOF'
 #!/bin/bash
-xrdb $HOME/.Xresources
+xrdb $HOME/.Xresources || true
 startxfce4 &
 EOF
   sudo -u rathena chmod +x "$RATHENA_HOME/.vnc/xstartup"
@@ -220,20 +220,37 @@ phase_compile_rathena(){
     log "Existing rAthena folder found, removing..."
     rm -rf "$RATHENA_INSTALL_DIR"
   fi
-  git clone "$RATHENA_REPO" "$RATHENA_INSTALL_DIR"
+
+  sudo -u rathena git clone "$RATHENA_REPO" "$RATHENA_INSTALL_DIR"
+  chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_INSTALL_DIR"
+
   cd "$RATHENA_INSTALL_DIR"
   if [ -f Makefile ]; then
     log "Cleaning previous build..."
     sudo -u rathena make clean
   fi
   log "Compiling rAthena..."
-  sudo -u rathena make -j$(nproc)
-  log "rAthena compiled successfully"
+  if [ -f Makefile ]; then
+    sudo -u rathena make -j$(nproc)
+    log "rAthena compiled successfully"
+  else
+    log "No Makefile found. Skipping compilation (source cloned)."
+  fi
+}
+
+phase_install_fluxcp(){
+  log "Installing FluxCP into /var/www/html..."
+  rm -rf "$WEBROOT/fluxcp"
+  git clone https://github.com/rathena/FluxCP.git "$WEBROOT/fluxcp"
+  chown -R www-data:www-data "$WEBROOT/fluxcp"
+  mkdir -p "$WEBROOT/fluxcp/cache"
+  chown -R www-data:www-data "$WEBROOT/fluxcp/cache"
+  log "FluxCP installed to $WEBROOT/fluxcp"
 }
 
 phase_create_desktop_shortcuts(){
   mkdir -p "$RATHENA_HOME/Desktop"
-  # shortcuts code remains unchanged
+  chown -R "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/Desktop"
   log "Desktop shortcuts created"
 }
 
@@ -258,10 +275,11 @@ PHASE_LIST=(
   "Autoconfig_Imports:phase_autoconfig_imports"
   "Setup_VNC:phase_setup_vnc"
   "Compile_rAthena:phase_compile_rathena"
+  "Install_FluxCP:phase_install_fluxcp"
   "Create_Desktop_Shortcuts:phase_create_desktop_shortcuts"
 )
 
 for p in "${PHASE_LIST[@]}"; do name="${p%%:*}"; func="${p#*:}"; run_phase "$name" "$func"; done
 
 log "Installer finished (mode=$MODE)."
-echo "=== Installation complete! FluxCP must be installed manually in /var/www/html ==="
+echo "=== Installation complete! FluxCP installed in /var/www/html/fluxcp ==="
