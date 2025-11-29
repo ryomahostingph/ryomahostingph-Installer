@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ================================
 # rAthena + FluxCP + TightVNC Installer
-# Fully fixed + FluxCP auto-install for Debian 12
+# Fully fixed + FluxCP auto-install + VNC cleanup for Debian 12
 # ================================
 
 set -o pipefail
@@ -173,6 +173,22 @@ EOF
   log "rAthena import-tmpl configs written"
 }
 
+# ================================
+# NEW: VNC cleanup before setup
+# ================================
+phase_cleanup_vnc(){
+  log "Cleaning up any old VNC sessions..."
+  # Kill all Xtightvnc processes for rathena
+  pkill -u rathena Xtightvnc 2>/dev/null || true
+  # Kill known display numbers
+  for i in {1..5}; do
+      sudo -u rathena vncserver -kill ":$i" 2>/dev/null || true
+  done
+  # Remove old PID files
+  rm -f "$RATHENA_HOME/.vnc/*.pid"
+  log "Old VNC sessions cleaned"
+}
+
 phase_setup_vnc(){
   log "Configuring TightVNC for rathena user..."
   sudo -u rathena rm -rf "$RATHENA_HOME/.vnc"
@@ -273,6 +289,7 @@ PHASE_LIST=(
   "Install_phpMyAdmin:phase_install_phpmyadmin"
   "Install_Chrome:phase_install_chrome"
   "Autoconfig_Imports:phase_autoconfig_imports"
+  "Cleanup_VNC:phase_cleanup_vnc"
   "Setup_VNC:phase_setup_vnc"
   "Compile_rAthena:phase_compile_rathena"
   "Install_FluxCP:phase_install_fluxcp"
