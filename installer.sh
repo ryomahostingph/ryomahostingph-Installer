@@ -8,7 +8,7 @@ RATHENA_REPO="https://github.com/rathena/rathena.git"
 RATHENA_INSTALL_DIR="${RATHENA_HOME}/Desktop/rathena"
 WEBROOT="/var/www/html"
 STATE_DIR="/opt/rathena_installer_state"
-DEFAULT_VNC_PASSWORD="Ch4ng3me"   # used only by vnc_fixer if invoked
+DEFAULT_VNC_PASSWORD="Ch4ng3me"   # default VNC password
 CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
 DB_USER="rathena"
 DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c12 || true)"
@@ -75,31 +75,87 @@ phase_install_packages_minimal(){
 }
 
 # -------------------------
-# Phase 2: Clean All
+# Create rAthena User
 # -------------------------
-phase_clean_all(){
-  log "Cleaning previous installations..."
-  systemctl stop vncserver@1.service 2>/dev/null || true
-  systemctl disable vncserver@1.service 2>/dev/null || true
-  rm -f /etc/systemd/system/vncserver@.service /etc/systemd/system/vncserver@1.service 2>/dev/null || true
-  rm -rf "$RATHENA_HOME/.vnc" "$RATHENA_HOME/.Xauthority" /tmp/.X*-lock /tmp/.X11-unix/* 2>/dev/null || true
-  rm -rf "$RATHENA_INSTALL_DIR" "$WEBROOT" || true
-  systemctl daemon-reload || true
-  userdel -r "$RATHENA_USER" || true
-  log "Cleanup completed."
+phase_create_rathena_user(){
+  log "Creating user: $RATHENA_USER..."
+  if ! id "$RATHENA_USER" &>/dev/null; then
+    useradd -m -s /bin/bash "$RATHENA_USER"
+    echo "$RATHENA_USER:$DB_PASS" | chpasswd
+    log "User '$RATHENA_USER' created."
+  else
+    log "User '$RATHENA_USER' already exists."
+  fi
 }
 
 # -------------------------
-# Phase 3: Create Desktop Shortcuts
+# Clone rAthena and FluxCP Repositories
+# -------------------------
+phase_clone_rathena(){
+  log "Cloning rAthena into $RATHENA_INSTALL_DIR..."
+  git clone "$RATHENA_REPO" "$RATHENA_INSTALL_DIR"
+  log "rAthena cloned."
+}
+
+phase_clone_fluxcp(){
+  log "Cloning FluxCP into $WEBROOT..."
+  git clone https://github.com/rathena/FluxCP.git "$WEBROOT"
+  log "FluxCP installed."
+}
+
+# -------------------------
+# Compile rAthena (Optional)
+# -------------------------
+phase_compile_rathena(){
+  log "Compiling rAthena..."
+  cd "$RATHENA_INSTALL_DIR"
+  if [ ! -f "Makefile" ]; then
+    log "Makefile not found, skipping compile."
+  else
+    make clean
+    make -j"$(nproc)"
+    log "rAthena compiled."
+  fi
+}
+
+# -------------------------
+# Install phpMyAdmin
+# -------------------------
+phase_install_phpmyadmin(){
+  log "Installing phpMyAdmin..."
+  apt install -y phpmyadmin
+  log "phpMyAdmin installed."
+}
+
+# -------------------------
+# Install Google Chrome
+# -------------------------
+phase_install_chrome(){
+  log "Installing Google Chrome..."
+  wget -q "$CHROME_URL" -O /tmp/google-chrome.deb
+  dpkg -i /tmp/google-chrome.deb
+  apt --fix-broken install -y
+  log "Google Chrome installed."
+}
+
+# -------------------------
+# Install TightVNC and XFCE
+# -------------------------
+install_tightvnc(){
+  log "Installing TightVNC and XFCE..."
+  apt install -y tightvncserver xfce4 xfce4-goodies dbus-x11
+  log "TightVNC and XFCE installed."
+}
+
+# -------------------------
+# Create Desktop Shortcuts
 # -------------------------
 phase_create_shortcuts(){
   log "Creating desktop shortcuts..."
-
-  # Ensure the desktop directory exists
   mkdir -p "$RATHENA_HOME/Desktop"
   chown "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/Desktop"
 
-  # Recompile rAthena shortcut
+  # Create shortcuts for rAthena actions
   cat > "$RATHENA_HOME/Desktop/Recompile_rAthena.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
@@ -109,7 +165,6 @@ Terminal=true
 Type=Application
 EOF
 
-  # Start rAthena Servers
   cat > "$RATHENA_HOME/Desktop/Start_rAthena.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
@@ -119,8 +174,7 @@ Terminal=true
 Type=Application
 EOF
 
-  # VNC Password Changer
-  cat > "$RATHENA_HOME/Desktop/VNC_Password_Changer.desktop" <<EOF
+  cat > "$RATHENA_HOME/Desktop/Change_VNC_Password.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
 Name=Change VNC Password
@@ -129,7 +183,6 @@ Terminal=true
 Type=Application
 EOF
 
-  # Backup rAthena Database
   cat > "$RATHENA_HOME/Desktop/Backup_rAthena_DB.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
@@ -139,18 +192,45 @@ Terminal=true
 Type=Application
 EOF
 
-  # Ensure the desktop files are created properly
-  log "Desktop shortcuts created at $RATHENA_HOME/Desktop."
-  ls -l "$RATHENA_HOME/Desktop/"
-
-  # Apply execute permissions
   chmod +x "$RATHENA_HOME/Desktop"/*.desktop
-  chown "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/Desktop"/*.desktop
-  log "Execute permissions set for desktop shortcuts."
+  log "Desktop shortcuts created."
 }
 
 # -------------------------
-# Main Menu for Interactive Installer
+# VNC Fixer (Set Password, etc.)
+# -------------------------
+run_vnc_fixer(){
+  log "Running VNC Fixer..."
+  if [ ! -f "$VNC_FIXER" ]; then
+    log "VNC Fixer script ($VNC_FIXER) not found. Skipping."
+    return
+  fi
+  bash "$VNC_FIXER"
+  log "VNC Fixer executed."
+}
+
+# -------------------------
+# Phase 4: Setup Services (Optional)
+# -------------------------
+phase_setup_rathena_services(){
+  log "Setting up rAthena as a service..."
+  # Optional: Create systemd service files here, if desired.
+}
+
+# -------------------------
+# Clean All
+# -------------------------
+phase_clean_all(){
+  log "Cleaning previous installations..."
+  rm -rf "$RATHENA_HOME/Desktop/rathena"
+  rm -rf "$WEBROOT"
+  rm -f /etc/systemd/system/vncserver@1.service
+  userdel -r "$RATHENA_USER" || true
+  log "Cleanup completed."
+}
+
+# -------------------------
+# Main Menu
 # -------------------------
 main_menu(){
   while true; do
@@ -174,37 +254,45 @@ EOF
         phase_update_upgrade
         phase_install_packages_minimal
         phase_create_rathena_user
-        phase_create_databases
+        phase_clone_rathena
+        phase_clone_fluxcp
+        phase_compile_rathena
+        phase_compile_rathena
         phase_install_phpmyadmin
         phase_install_chrome
-        phase_clone_rathena
-        phase_compile_rathena
-        phase_install_fluxcp
+        install_tightvnc
         phase_create_shortcuts
-        log "Install finished"
+        run_vnc_fixer
+        phase_setup_rathena_services
+        log "rAthena + FluxCP installation complete."
         ;;
       3)
         log "Selected: Install TightVNC + XFCE"
-        install_tightvnc_packages
+        install_tightvnc
+        phase_create_shortcuts
+        run_vnc_fixer
+        log "TightVNC and XFCE installation complete."
         ;;
       4)
-        log "Selected: Run VNC fixer"
+        log "Selected: Run VNC Fixer"
         run_vnc_fixer
+        log "VNC Fixer completed."
         ;;
       5)
-        log "Selected: Setup rAthena Services"
+        log "Selected: Setup rAthena Services for Auto Start"
         phase_setup_rathena_services
+        log "rAthena services setup completed."
         ;;
       6)
-        log "Exiting"
+        log "Exiting..."
         exit 0
         ;;
       *)
-        echo "Invalid option"
+        log "Invalid option. Please choose a valid option."
         ;;
     esac
   done
 }
 
-# Run main menu
+# Start the menu
 main_menu
