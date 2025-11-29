@@ -11,7 +11,6 @@ set -e
 RATHENA_USER="rathena"
 RATHENA_HOME="/home/${RATHENA_USER}"
 RATHENA_REPO="https://github.com/rathena/rathena.git"
-FLUXCP_REPO="https://github.com/rathena/FluxCP.git"
 WEBROOT="/var/www/html"
 RATHENA_INSTALL_DIR="${RATHENA_HOME}/Desktop/rathena"
 BUILD_DIR="${RATHENA_HOME}/Desktop/build"
@@ -28,7 +27,6 @@ DB_LOGS="ragnarok_logs"
 DB_FLUXCP="fluxcp"
 
 WHITELIST_ALWAYS=("120.28.137.77" "127.0.0.1")
-BACKGROUND_IMAGE_PATH="${RATHENA_HOME}/background.png"
 
 # ================================
 # Helpers
@@ -178,6 +176,56 @@ EOF
   log "rAthena import-tmpl configs written"
 }
 
+phase_setup_vnc(){
+  log "Configuring TightVNC for rathena user..."
+  sudo -u rathena rm -rf "$RATHENA_HOME/.vnc"
+  sudo -u rathena mkdir -p "$RATHENA_HOME/.vnc"
+
+  echo "$DEFAULT_VNC_PASSWORD" | sudo -u rathena vncpasswd -f > "$RATHENA_HOME/.vnc/passwd"
+  chmod 600 "$RATHENA_HOME/.vnc/passwd"
+
+  sudo -u rathena tee "$RATHENA_HOME/.vnc/xstartup" > /dev/null <<EOF
+#!/bin/bash
+xrdb \$HOME/.Xresources
+startxfce4 &
+EOF
+  sudo -u rathena chmod +x "$RATHENA_HOME/.vnc/xstartup"
+
+  # Create systemd service
+  cat >/etc/systemd/system/vncserver@:1.service <<EOF
+[Unit]
+Description=Start TightVNC server at startup
+After=syslog.target network.target
+
+[Service]
+Type=forking
+User=rathena
+PAMName=login
+PIDFile=/home/rathena/.vnc/%H:1.pid
+ExecStartPre=-/usr/bin/vncserver -kill :1
+ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 24
+ExecStop=/usr/bin/vncserver -kill :1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable vncserver@:1
+  systemctl start vncserver@:1
+  log "TightVNC configured and started"
+}
+
+phase_compile_rathena(){
+  log "Cloning rAthena source..."
+  git clone "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" || log "rAthena already cloned"
+  cd "$RATHENA_INSTALL_DIR"
+  log "Compiling rAthena..."
+  sudo -u rathena make clean
+  sudo -u rathena make -j$(nproc)
+  log "rAthena compiled successfully"
+}
+
 phase_create_desktop_shortcuts(){
   mkdir -p "$RATHENA_HOME/Desktop"
 
@@ -248,7 +296,7 @@ EOF
 # ================================
 # MAIN
 # ================================
-echo "=== rAthena + FluxCP + TightVNC Installer (with additional features) ==="
+echo "=== rAthena + FluxCP + TightVNC Installer (with full features) ==="
 echo "Modes: 1) Wipe 2) Resume"
 read -r choice
 MODE=$([ "$choice" = "1" ] && echo wipe || echo resume)
@@ -264,6 +312,8 @@ PHASE_LIST=(
   "Install_phpMyAdmin:phase_install_phpmyadmin"
   "Install_Chrome:phase_install_chrome"
   "Autoconfig_Imports:phase_autoconfig_imports"
+  "Setup_VNC:phase_setup_vnc"
+  "Compile_rAthena:phase_compile_rathena"
   "Create_Desktop_Shortcuts:phase_create_desktop_shortcuts"
 )
 
