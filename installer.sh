@@ -169,8 +169,10 @@ phase_install_fluxcp(){
 # -------------------------
 phase_create_shortcuts(){
   log "Creating desktop shortcuts..."
+  
+  # Ensure the Desktop directory exists
   mkdir -p "$RATHENA_HOME/Desktop"
-
+  
   # Recompile rAthena shortcut
   cat > "$RATHENA_HOME/Desktop/Recompile_rAthena.desktop" <<EOF
 [Desktop Entry]
@@ -181,7 +183,7 @@ Terminal=true
 Type=Application
 EOF
 
-  # Start rAthena Servers
+  # Start rAthena Servers shortcut
   cat > "$RATHENA_HOME/Desktop/Start_rAthena.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
@@ -191,7 +193,7 @@ Terminal=true
 Type=Application
 EOF
 
-  # VNC Password Changer
+  # VNC Password Changer shortcut
   cat > "$RATHENA_HOME/Desktop/VNC_Password_Changer.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
@@ -201,7 +203,7 @@ Terminal=true
 Type=Application
 EOF
 
-  # Backup rAthena Database
+  # Backup rAthena Database shortcut
   cat > "$RATHENA_HOME/Desktop/Backup_rAthena_DB.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
@@ -211,8 +213,10 @@ Terminal=true
 Type=Application
 EOF
 
-  chmod +x "$RATHENA_HOME/Desktop/*.desktop"
-  chown "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/Desktop/*.desktop"
+  # Ensure correct permissions for .desktop files
+  chmod +x "$RATHENA_HOME/Desktop"/*.desktop
+  chown "$RATHENA_USER":"$RATHENA_USER" "$RATHENA_HOME/Desktop"/*.desktop
+
   log "Desktop shortcuts created."
 }
 
@@ -263,6 +267,7 @@ EOF
         log "Selected: Clean All"
         phase_clean_all
         ;;
+
       2)
         log "Selected: Install rAthena + FluxCP"
         phase_update_upgrade
@@ -277,22 +282,27 @@ EOF
         phase_create_shortcuts
         log "Install finished"
         ;;
+
       3)
         log "Selected: Install TightVNC + XFCE"
         install_tightvnc_packages
         ;;
+
       4)
         log "Selected: Run VNC fixer"
         run_vnc_fixer
         ;;
+
       5)
         log "Selected: Setup rAthena Services"
         phase_setup_rathena_services
         ;;
+
       6)
         log "Exiting"
         exit 0
         ;;
+
       *)
         echo "Invalid option"
         ;;
