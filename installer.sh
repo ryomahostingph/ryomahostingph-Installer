@@ -29,6 +29,15 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 [ "$(id -u)" -eq 0 ] || { echo "Run as root"; exit 1; }
 
 # -------------------------
+# Phase 1: System Update and Cleanup
+# -------------------------
+phase_update_upgrade(){
+  log "Updating system..."
+  apt update -y && apt upgrade -y
+  log "System updated."
+}
+
+# -------------------------
 # Helper Functions for Phases
 # -------------------------
 phase_clean_all(){
