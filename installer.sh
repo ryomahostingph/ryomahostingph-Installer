@@ -38,7 +38,44 @@ phase_update_upgrade(){
 }
 
 # -------------------------
-# Helper Functions for Phases
+# Install Essential Packages (Minimal)
+# -------------------------
+phase_install_packages_minimal(){
+  log "Installing essential packages..."
+  apt install -y \
+    build-essential \
+    git \
+    cmake \
+    autoconf \
+    libssl-dev \
+    libmariadb-dev-compat \
+    libmariadb-dev \
+    libpcre3-dev \
+    zlib1g-dev \
+    libxml2-dev \
+    wget \
+    curl \
+    unzip \
+    apache2 \
+    php \
+    php-mysql \
+    php-gd \
+    php-xml \
+    php-mbstring \
+    mariadb-server \
+    dbus-x11 \
+    xauth \
+    xorg \
+    ufw \
+    tightvncserver \
+    xfce4 \
+    xfce4-goodies \
+    x11-xserver-utils
+  log "Essential packages installed."
+}
+
+# -------------------------
+# Phase 2: Clean All
 # -------------------------
 phase_clean_all(){
   log "Cleaning previous installations..."
@@ -53,7 +90,7 @@ phase_clean_all(){
 }
 
 # -------------------------
-# Phase 10: Create Desktop Shortcuts
+# Phase 3: Create Desktop Shortcuts
 # -------------------------
 phase_create_shortcuts(){
   log "Creating desktop shortcuts..."
