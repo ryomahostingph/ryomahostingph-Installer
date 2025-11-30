@@ -49,12 +49,8 @@ run_phase() {
     local label="$1"; shift
     log "=== Starting: ${label} ==="
 
-    # Make sure 'set -e' behavior doesn’t kill us mid-phase
-    set +e
     "$@"
     local rc=$?
-    set -e +o pipefail 2>/dev/null || true
-    set -o pipefail
 
     if [ $rc -ne 0 ]; then
         log "ERROR: ${label} failed with exit code ${rc}"
@@ -166,13 +162,40 @@ EOF
 phase_compile_rathena() {
     log "Compiling rAthena (as ${RATHENA_USER})..."
 
-    [ -d "$RATHENA_INSTALL_DIR" ] || { log "rAthena directory not found"; return 1; }
+    if [ ! -d "$RATHENA_INSTALL_DIR" ]; then
+        log "rAthena directory not found at ${RATHENA_INSTALL_DIR}."
+        echo "rAthena source directory not found. Did cloning fail?"
+        return 1
+    fi
 
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR"
-
     cd "$RATHENA_INSTALL_DIR"
-    make clean &>> "$LOGFILE"
-    make -j"$(nproc)" &>> "$LOGFILE" || { log "Compilation failed! See $LOGFILE"; return 1; }
+
+    if [ -f "Makefile" ]; then
+        log "Detected Makefile – using make-based build."
+        {
+          make clean
+          make -j"$(nproc)"
+        } >>"$LOGFILE" 2>&1 || {
+          log "Compilation failed using make. See $LOGFILE for details."
+          echo "Compilation failed because the make-based build reported errors."
+          return 1
+        }
+    elif [ -f "CMakeLists.txt" ]; then
+        log "No Makefile found – using CMake out-of-source build (build/ directory)."
+        {
+          cmake -S . -B build
+          cmake --build build -j"$(nproc)"
+        } >>"$LOGFILE" 2>&1 || {
+          log "Compilation failed using CMake. See $LOGFILE for details."
+          echo "Compilation failed during the CMake build. Check ${LOGFILE} for exact compiler errors."
+          return 1
+        }
+    else
+        log "Neither Makefile nor CMakeLists.txt found – cannot determine build system."
+        echo "Could not compile rAthena: no Makefile or CMakeLists.txt found in ${RATHENA_INSTALL_DIR}."
+        return 1
+    fi
 
     log "rAthena compiled successfully."
 }
@@ -200,29 +223,18 @@ phase_generate_fluxcp_config() {
     APPFILE="$WEBROOT/application/config/application.php"
     SRVFILE="$WEBROOT/application/config/server.php"
 
-    # Ensure config directory exists
     mkdir -p "$WEBROOT/application/config"
 
-    # Create empty PHP config files if missing
     [ ! -f "$APPFILE" ] && echo "<?php return [];" > "$APPFILE"
     [ ! -f "$SRVFILE" ] && echo "<?php return [];" > "$SRVFILE"
 
-    ###########################
-    # application.php patches
-    ###########################
     sed -i "s/'BaseURI'[[:space:]]*=>[[:space:]]*'[^']*'/'BaseURI' => '\/'/g" "$APPFILE"
     sed -i "s/'InstallerPassword'[[:space:]]*=>[[:space:]]*'[^']*'/'InstallerPassword' => 'RyomaHostingPH'/g" "$APPFILE"
     sed -i "s/'SiteTitle'[[:space:]]*=>[[:space:]]*'[^']*'/'SiteTitle' => 'Ragnarok Control Panel'/g" "$APPFILE"
     sed -i "s/'DonationCurrency'[[:space:]]*=>[[:space:]]*'[^']*'/'DonationCurrency' => 'PHP'/g" "$APPFILE"
 
-    ###########################
-    # server.php patches
-    ###########################
     sed -i "s/'ServerName'[[:space:]]*=>[[:space:]]*'[^']*'/'ServerName' => 'RagnaROK'/g" "$SRVFILE"
 
-    ###########################
-    # DbConfig block
-    ###########################
     sed -i "/'DbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
         s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/
         s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/
@@ -231,9 +243,6 @@ phase_generate_fluxcp_config() {
         s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/
     }" "$SRVFILE"
 
-    ###########################
-    # LogsDbConfig block
-    ###########################
     sed -i "/'LogsDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
         s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/
         s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/
@@ -241,9 +250,6 @@ phase_generate_fluxcp_config() {
         s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_LOGS}'/
     }" "$SRVFILE"
 
-    ###########################
-    # WebDbConfig block
-    ###########################
     sed -i "/'WebDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
         s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/
         s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/
@@ -251,7 +257,6 @@ phase_generate_fluxcp_config() {
         s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/
     }" "$SRVFILE"
 
-    # Fix permissions
     chown -R www-data:www-data "$WEBROOT"
     usermod -a -G www-data rathena
     chmod -R 0774 "$WEBROOT"
@@ -366,8 +371,9 @@ EOF
     "bash -lc '${RATHENA_HOME}/restart_servers_xfce.sh'" \
     "view-refresh" false
 
+  # Updated to use same make/CMake auto-detection logic
   write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
-    "bash -lc 'cd ${RATHENA_INSTALL_DIR} && ./configure --enable-utf8 --packetver=20240403 && make clean && make -j\$(nproc)'" \
+    "bash -lc 'cd ${RATHENA_INSTALL_DIR} && if [ -f Makefile ]; then make clean && make -j\$(nproc); elif [ -f CMakeLists.txt ]; then cmake -S . -B build && cmake --build build -j\$(nproc); else echo \"No Makefile or CMakeLists.txt found in ${RATHENA_INSTALL_DIR}\"; fi'" \
     "applications-development" true
 
   write_desktop "Change_VNC_Password.desktop" "Change VNC Password" \
@@ -392,34 +398,23 @@ EOF
 phase_clean_all(){
     log "Cleaning previous rAthena installation completely..."
 
-    # Stop VNC server if running
     systemctl stop vncserver@1.service 2>/dev/null || true
 
-    # Remove rAthena installation folder
     rm -rf "$RATHENA_INSTALL_DIR" 2>/dev/null || true
 
-    # Remove FluxCP files
     if [ -d "$WEBROOT" ]; then
         find "$WEBROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
     fi
 
-    # Remove Desktop details and shortcuts
     rm -f "$RATHENA_HOME/Desktop/ServerDetails.txt"
     rm -f "$RATHENA_HOME/Desktop/"*.desktop 2>/dev/null || true
 
-    # Remove DB backups and import folders
     rm -rf "$RATHENA_HOME/db_backups" "$RATHENA_HOME/sql_imports"
-
-    # Remove autostart configs
     rm -rf "$RATHENA_HOME/.config/autostart"
-
-    # Remove hidden VNC config
     rm -rf "$RATHENA_HOME/.vnc"
 
-    # Remove rAthena DB credentials file
     rm -f "$CRED_FILE"
 
-    # Drop MariaDB databases and user
     mariadb <<SQL
 DROP DATABASE IF EXISTS ${DB_RAGNAROK};
 DROP DATABASE IF EXISTS ${DB_LOGS};
