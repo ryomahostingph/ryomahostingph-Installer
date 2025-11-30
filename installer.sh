@@ -29,6 +29,25 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
 apt_install(){ DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends "$@"; }
 
+# --- Helper function to create desktop shortcuts ---
+write_desktop(){
+  local file="$1" name="$2" cmd="$3" icon="$4" terminal="${5:-false}"
+  local DESKTOP_DIR="${RATHENA_HOME}/Desktop"
+  mkdir -p "$DESKTOP_DIR"
+  cat > "${DESKTOP_DIR}/${file}" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=${name}
+Exec=${cmd}
+Terminal=${terminal}
+Type=Application
+Icon=${icon}
+EOF
+  chmod +x "${DESKTOP_DIR}/${file}"
+  chown "${RATHENA_USER}:${RATHENA_USER}" "${DESKTOP_DIR}/${file}"
+  log "Created ${DESKTOP_DIR}/${file}"
+}
+
 # --- Phases ---
 phase_update_upgrade(){ log "Updating system..."; apt update -y; apt upgrade -y; log "System updated."; }
 
@@ -139,7 +158,6 @@ phase_generate_rathena_config(){
   PUBLIC_IP=$(curl -s https://api.ipify.org || echo "127.0.0.1")
   PRIVATE_IP=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "127.0.0.1")
 
-  # Load DB credentials
   if [ -f "/root/.rathena_db_credentials" ]; then
     source /root/.rathena_db_credentials
   fi
@@ -170,7 +188,6 @@ map-server:
 EOF
 
   log "rAthena config files generated in ${IMPORT_DIR}"
-  log "Public IP: ${PUBLIC_IP}, Private IP: ${PRIVATE_IP}"
 }
 
 phase_compile_rathena(){
@@ -206,6 +223,32 @@ phase_setup_ufw(){
   log "Configuring UFW..."
   ufw allow 22/tcp 80/tcp 443/tcp 3306/tcp 5121/tcp 6121/tcp 6900/tcp 5901/tcp
   ufw --force enable || true
+}
+
+phase_create_desktop_shortcuts(){
+  log "Creating desktop shortcuts..."
+  # Terminal / configs / monitor
+  write_desktop "Terminal.desktop" "Terminal" "xfce4-terminal" "utilities-terminal" false
+  write_desktop "Edit_rAthena_Configs.desktop" "Edit rAthena Configs" \
+    "bash -lc 'xdg-open ${RATHENA_INSTALL_DIR}/conf || xterm -e \"ls -la ${RATHENA_INSTALL_DIR}/conf\"'" \
+    "text-editor" false
+  write_desktop "System_Monitor.desktop" "System Monitor" "xterm -e 'htop || top'" "utilities-system-monitor" true
+
+  # Start/stop/restart servers
+  write_desktop "Start_All_Servers.desktop" "Start All Servers" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/start_servers_xfce.sh\"'" \
+    "media-playback-start" false
+  write_desktop "Stop_All_Servers.desktop" "Stop All Servers" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/stop_servers_xfce.sh\"'" \
+    "media-playback-stop" false
+  write_desktop "Restart_All_Servers.desktop" "Restart All Servers" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/restart_servers_xfce.sh\"'" \
+    "view-refresh" false
+
+  # Recompile rAthena with PacketVer 20240403
+  write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"cd ${RATHENA_INSTALL_DIR} && ./configure --enable-utf8 --packetver=20240403 && make clean || true && make -j\$(nproc)\"'" \
+    "applications-development" true
 }
 
 phase_clean_all(){
@@ -248,10 +291,11 @@ main(){
   phase_setup_mariadb
   phase_import_sqls
   phase_generate_fluxcp_config
-  phase_generate_rathena_config   # <-- now auto runs
+  phase_generate_rathena_config
   phase_compile_rathena
   phase_create_vnc_service
   phase_setup_ufw
+  phase_create_desktop_shortcuts
   print_summary
   log "Installer finished."
 }
