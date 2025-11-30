@@ -173,26 +173,106 @@ phase_import_sqls(){
 }
 
 
-phase_generate_fluxcp_config(){
+phase_generate_fluxcp_config() {
     log "Generating FluxCP database config..."
+
     CONF_DIR="$WEBROOT/application/config"
     mkdir -p "$CONF_DIR"
+
     cat > "$CONF_DIR/database.php" <<EOF
-<?php return [
-  'default' => [
-    'host' => 'localhost',
-    'username' => '${DB_USER}',
-    'password' => '${DB_PASS}',
-    'database' => '${DB_FLUXCP}',
-    'dbdriver' => 'mysqli',
-    'char_set' => 'utf8',
-    'dbcollat' => 'utf8_general_ci',
-  ],
+<?php
+return [
+    'default' => [
+        'host'     => 'localhost',
+        'username' => '${DB_USER}',
+        'password' => '${DB_PASS}',
+        'database' => '${DB_FLUXCP}',
+        'dbdriver' => 'mysqli',
+        'char_set' => 'utf8mb4',
+        'dbcollat' => 'utf8mb4_unicode_ci',
+    ],
 ];
 EOF
+
     chown -R www-data:www-data "$WEBROOT"
-    log "FluxCP config generated."
+    log "FluxCP database.php generated."
 }
+
+
+
+phase_patch_fluxcp_settings() {
+    log "Patching FluxCP application.php and server.php..."
+
+    APPFILE="$WEBROOT/application/config/application.php"
+    SRVFILE="$WEBROOT/application/config/server.php"
+
+    ####################################
+    # application.php patches
+    ####################################
+
+    # BaseURI = '/'
+    sed -i "s/'BaseURI'[[:space:]]*=>[[:space:]]*'[^']*'/'BaseURI' => '\/'/g" "$APPFILE"
+
+    # InstallerPassword = 'RyomaHostingPH'
+    sed -i "s/'InstallerPassword'[[:space:]]*=>[[:space:]]*'[^']*'/'InstallerPassword' => 'RyomaHostingPH'/g" "$APPFILE"
+
+    # SiteTitle = 'Ragnarok Control Panel'
+    sed -i "s/'SiteTitle'[[:space:]]*=>[[:space:]]*'[^']*'/'SiteTitle' => 'Ragnarok Control Panel'/g" "$APPFILE"
+
+    # DonationCurrency = 'PHP'
+    sed -i "s/'DonationCurrency'[[:space:]]*=>[[:space:]]*'[^']*'/'DonationCurrency' => 'PHP'/g" "$APPFILE"
+
+
+
+    ####################################
+    # server.php patches
+    ####################################
+
+    # ServerName = 'RagnaROK'
+    sed -i "s/'ServerName'[[:space:]]*=>[[:space:]]*'[^']*'/'ServerName' => 'RagnaROK'/g" "$SRVFILE"
+
+
+    #############################
+    # DbConfig block
+    #############################
+    sed -i "/'DbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
+        s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname'   => '127.0.0.1'/
+        s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert'    => 'utf8'/
+        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username'   => '${DB_USER}'/
+        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password'   => '${DB_PASS}'/
+        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database'   => '${DB_RAGNAROK}'/
+    }" "$SRVFILE"
+
+
+    #############################
+    # LogsDbConfig block
+    #############################
+    sed -i "/'LogsDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
+        s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert'    => 'utf8'/
+        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username'   => '${DB_USER}'/
+        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password'   => '${DB_PASS}'/
+        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database'   => '${DB_LOGS}'/
+    }" "$SRVFILE"
+
+
+    #############################
+    # WebDbConfig block
+    #############################
+    sed -i "/'WebDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
+        s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname'   => '127.0.0.1'/
+        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username'   => '${DB_USER}'/
+        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password'   => '${DB_PASS}'/
+        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database'   => '${DB_RAGNAROK}'/
+    }" "$SRVFILE"
+
+    chown -R www-data:www-data "$WEBROOT"
+    usermod -a -G www-data rathena
+    chmod -R 0774 /var/www/html
+
+    log "FluxCP application.php and server.php patched."
+}
+
+
 
 phase_generate_rathena_config(){
     log "Generating rAthena import config files..."
