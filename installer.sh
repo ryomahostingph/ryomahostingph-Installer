@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 # ================== VARIABLES ==================
 LOGFILE="/var/log/rathena_installer_final.log"
@@ -43,6 +43,40 @@ else
     log "No existing DB credentials found. Generating new password..."
     DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || true)"
 fi
+
+# ================== PHASE WRAPPER (ERROR HANDLING) ==================
+run_phase() {
+    local label="$1"; shift
+    log "=== Starting: ${label} ==="
+
+    # Make sure 'set -e' behavior doesn’t kill us mid-phase
+    set +e
+    "$@"
+    local rc=$?
+    set -e +o pipefail 2>/dev/null || true
+    set -o pipefail
+
+    if [ $rc -ne 0 ]; then
+        log "ERROR: ${label} failed with exit code ${rc}"
+        echo
+        echo ">>> ERROR: ${label} failed (exit code ${rc})."
+        if [ -s "$LOGFILE" ]; then
+            echo
+            echo "Last 20 lines from ${LOGFILE}:"
+            echo "----------------------------------------"
+            tail -n 20 "$LOGFILE" || true
+            echo "----------------------------------------"
+        else
+            echo "No log output available yet at ${LOGFILE}."
+        fi
+        echo
+        read -rp "Press Enter to return to the menu..." _
+        return $rc
+    fi
+
+    log "=== Completed: ${label} ==="
+    return 0
+}
 
 # ================== PHASES ==================
 
@@ -415,24 +449,51 @@ EOF
     log "DB password regenerated: ${DB_PASS}"
 }
 
-# ================== MAIN INSTALLER ==================
-main(){
+# ================== MAIN INSTALLER (FULL) ==================
+full_install(){
     log "Starting full installer..."
-    phase_update_upgrade
-    phase_install_packages
-    phase_install_chrome
-    phase_create_rathena_user
-    phase_clone_repos
-    phase_setup_mariadb
-    phase_import_sqls
-    phase_generate_fluxcp_config
-    phase_generate_rathena_config
-    phase_compile_rathena
-    phase_create_serverdetails
-    phase_create_desktop_shortcuts
-    log "Installer finished. ServerDetails.txt on Desktop and shortcuts created."
+
+    run_phase "System update & upgrade"          phase_update_upgrade       || { log "Full installer aborted."; return 1; }
+    run_phase "Install base packages"           phase_install_packages     || { log "Full installer aborted."; return 1; }
+    run_phase "Install Chrome/Chromium"         phase_install_chrome       || { log "Full installer aborted."; return 1; }
+    run_phase "Create rAthena user"             phase_create_rathena_user  || { log "Full installer aborted."; return 1; }
+    run_phase "Clone rAthena and FluxCP"        phase_clone_repos          || { log "Full installer aborted."; return 1; }
+    run_phase "Setup MariaDB"                   phase_setup_mariadb        || { log "Full installer aborted."; return 1; }
+    run_phase "Import SQL files"                phase_import_sqls          || { log "Full installer aborted."; return 1; }
+    run_phase "Generate FluxCP config"          phase_generate_fluxcp_config || { log "Full installer aborted."; return 1; }
+    run_phase "Generate rAthena config"         phase_generate_rathena_config || { log "Full installer aborted."; return 1; }
+    run_phase "Compile rAthena"                 phase_compile_rathena      || { log "Full installer aborted."; return 1; }
+    run_phase "Create ServerDetails.txt"        phase_create_serverdetails || { log "Full installer aborted."; return 1; }
+    run_phase "Create desktop shortcuts"        phase_create_desktop_shortcuts || { log "Full installer aborted."; return 1; }
+
+    log "Full installer finished successfully."
+    echo
+    echo "Full installation complete!"
+    read -rp "Press Enter to return to the menu..." _
 }
 
-# ================== NON-INTERACTIVE ENTRYPOINT ==================
-main
-exit 0
+# ================== MENU LOOP ==================
+while true; do
+  clear
+  echo "================ rAthena Installer ================="
+  echo " 1) Run full installer"
+  echo " 2) Clean previous install (files + DBs + DB user)"
+  echo " 3) Regenerate rAthena DB password"
+  echo " 4) Recompile rAthena server"
+  echo " 5) Generate rAthena config (conf/import)"
+  echo " 6) Generate FluxCP config (application/config)"
+  echo " 7) Exit"
+  echo "===================================================="
+  read -rp "Choose an option [1-7]: " choice
+
+  case "$choice" in
+    1) full_install ;;
+    2) run_phase "Clean previous install" phase_clean_all ;;
+    3) run_phase "Regenerate DB password" phase_regenerate_db_password ;;
+    4) run_phase "Recompile rAthena"      phase_compile_rathena ;;
+    5) run_phase "Generate rAthena config" phase_generate_rathena_config ;;
+    6) run_phase "Generate FluxCP config"  phase_generate_fluxcp_config ;;
+    7) echo "Exiting."; exit 0 ;;
+    *) echo "Invalid choice."; read -rp "Press Enter to continue..." _ ;;
+  esac
+done
