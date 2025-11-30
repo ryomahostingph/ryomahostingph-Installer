@@ -205,7 +205,7 @@ phase_compile_rathena() {
           echo
           echo "rAthena compilation failed during the CMake build."
           echo "Most common causes:"
-          echo "  - Missing dev libraries (e.g. zlib, OpenSSL, MariaDB headers)"
+          echo "  - Missing dev libraries (zlib, OpenSSL, MariaDB headers, etc.)"
           echo "  - Source code errors or incompatible options"
           echo
           echo "Check ${LOGFILE} and look right after the '[cmake build]' section for the exact error."
@@ -394,9 +394,9 @@ EOF
     "bash -lc '${RATHENA_HOME}/restart_servers_xfce.sh'" \
     "view-refresh" false
 
-  # Updated to use same make/CMake auto-detection logic
+  # Uses same make/CMake auto-detection logic
   write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
-    "bash -lc 'cd ${RATHENA_INSTALL_DIR} && if [ -f Makefile ]; then make clean && make -j\$(nproc); elif [ -f CMakeLists.txt ]; then cmake -S . -B build && cmake --build build -j\$(nproc); else echo \"No Makefile or CMakeLists.txt found in ${RATHENA_INSTALL_DIR}\"; fi'" \
+    "bash -lc 'cd ${RATHENA_INSTALL_DIR} && if [ -f Makefile ]; then make clean && make -j\$(nproc); elif [ -f CMakeLists.txt ]; then rm -rf build && cmake -S . -B build && cmake --build build -j\$(nproc); else echo \"No Makefile or CMakeLists.txt found in ${RATHENA_INSTALL_DIR}\"; fi'" \
     "applications-development" true
 
   write_desktop "Change_VNC_Password.desktop" "Change VNC Password" \
@@ -475,7 +475,7 @@ full_install(){
     run_phase "Install base packages"           phase_install_packages     || { log "Full installer aborted."; return 1; }
     run_phase "Install Chrome/Chromium"         phase_install_chrome       || { log "Full installer aborted."; return 1; }
     run_phase "Create rAthena user"             phase_create_rathena_user  || { log "Full installer aborted."; return 1; }
-    run_phase "Clone rAthena and FluxCP"        phase_clone_repos          || { log "Full installer aborted."; return 1; }
+    run_phase "Clone rAthena and FluxCP"        phase_clone_repos          || { log "Full installer aborted"; return 1; }
     run_phase "Setup MariaDB"                   phase_setup_mariadb        || { log "Full installer aborted."; return 1; }
     run_phase "Import SQL files"                phase_import_sqls          || { log "Full installer aborted."; return 1; }
     run_phase "Generate FluxCP config"          phase_generate_fluxcp_config || { log "Full installer aborted."; return 1; }
