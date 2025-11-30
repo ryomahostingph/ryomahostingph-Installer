@@ -164,7 +164,7 @@ phase_compile_rathena() {
 
     if [ ! -d "$RATHENA_INSTALL_DIR" ]; then
         log "rAthena directory not found at ${RATHENA_INSTALL_DIR}."
-        echo "rAthena source directory not found. Did cloning fail?"
+        echo "rAthena source directory not found. The clone step may have failed or been skipped."
         return 1
     fi
 
@@ -173,31 +173,54 @@ phase_compile_rathena() {
 
     if [ -f "Makefile" ]; then
         log "Detected Makefile – using make-based build."
+        echo "Using legacy make build system..."
+
         {
           make clean
           make -j"$(nproc)"
         } >>"$LOGFILE" 2>&1 || {
           log "Compilation failed using make. See $LOGFILE for details."
-          echo "Compilation failed because the make-based build reported errors."
+          echo
+          echo "rAthena compilation failed while running 'make'."
+          echo "Open ${LOGFILE} and search for 'error:' lines to see the exact compiler error."
           return 1
         }
+
     elif [ -f "CMakeLists.txt" ]; then
         log "No Makefile found – using CMake out-of-source build (build/ directory)."
+        echo "Using CMake build system (this can take a bit)."
+
+        # Clean previous build dir to avoid stale CMake cache/config
+        rm -rf build
+        mkdir -p build
+
         {
+          echo ">>> [cmake configure]"
           cmake -S . -B build
+
+          echo ">>> [cmake build]"
           cmake --build build -j"$(nproc)"
         } >>"$LOGFILE" 2>&1 || {
           log "Compilation failed using CMake. See $LOGFILE for details."
-          echo "Compilation failed during the CMake build. Check ${LOGFILE} for exact compiler errors."
+          echo
+          echo "rAthena compilation failed during the CMake build."
+          echo "Most common causes:"
+          echo "  - Missing dev libraries (e.g. zlib, OpenSSL, MariaDB headers)"
+          echo "  - Source code errors or incompatible options"
+          echo
+          echo "Check ${LOGFILE} and look right after the '[cmake build]' section for the exact error."
           return 1
         }
+
     else
         log "Neither Makefile nor CMakeLists.txt found – cannot determine build system."
         echo "Could not compile rAthena: no Makefile or CMakeLists.txt found in ${RATHENA_INSTALL_DIR}."
+        echo "Check that the rAthena repository cloned correctly and contains the expected files."
         return 1
     fi
 
     log "rAthena compiled successfully."
+    echo "rAthena compiled successfully."
 }
 
 phase_import_sqls(){
