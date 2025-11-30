@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ================== VARIABLES ==================
 LOGFILE="/var/log/rathena_installer_final.log"
 RATHENA_USER="rathena"
 RATHENA_HOME="/home/${RATHENA_USER}"
@@ -19,6 +20,7 @@ DB_FLUXCP="fluxcp"
 
 CRED_FILE="/root/.rathena_db_credentials"
 
+# ================== SETUP LOG & ENV ==================
 mkdir -p "$(dirname "$LOGFILE")" "$STATE_DIR"
 touch "$LOGFILE" || true
 chmod 600 "$LOGFILE" 2>/dev/null || true
@@ -27,17 +29,16 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
 apt_install(){ DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends "$@"; }
 
-# ------------------ LOAD / GENERATE DB CREDENTIALS ------------------
+# ================== LOAD / GENERATE DB CREDENTIALS ==================
 if [ -f "$CRED_FILE" ]; then
     log "Loading existing DB credentials from $CRED_FILE"
-    # shellcheck disable=SC1090
     source "$CRED_FILE"
 else
     log "No existing DB credentials found. Generating new password..."
     DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || true)"
 fi
 
-# ------------------ PHASES ------------------
+# ================== PHASES ==================
 
 phase_update_upgrade(){
     log "Updating system..."
@@ -61,10 +62,10 @@ phase_install_chrome(){
     if wget -O /tmp/chrome.deb "$CHROME_URL"; then
         apt install -y /tmp/chrome.deb && rm -f /tmp/chrome.deb
         log "Google Chrome installed."
-        return
+    else
+        log "Falling back to Chromium..."
+        apt_install chromium || log "No browser installed."
     fi
-    log "Falling back to Chromium..."
-    apt_install chromium || log "No browser installed."
 }
 
 phase_create_rathena_user(){
@@ -83,6 +84,7 @@ phase_clone_repos(){
     log "Cloning rAthena..."
     rm -rf "$RATHENA_INSTALL_DIR"
     sudo -u "$RATHENA_USER" git clone --depth 1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" || log "Failed to clone rAthena"
+    
     log "Cloning FluxCP into ${WEBROOT}..."
     rm -rf "${WEBROOT:?}/"* "${WEBROOT:?}/".* 2>/dev/null || true
     git clone --depth 1 https://github.com/rathena/FluxCP.git "$WEBROOT" || log "Failed to clone FluxCP"
@@ -116,125 +118,46 @@ EOF
 phase_compile_rathena() {
     log "Preparing to compile rAthena (as ${RATHENA_USER})..."
 
-    # Ensure rAthena directory exists
-    if [ ! -d "$RATHENA_INSTALL_DIR" ]; then
-        log "rAthena directory not found: $RATHENA_INSTALL_DIR"
-        return 1
-    fi
-
-    # Fix ownership
+    [ -d "$RATHENA_INSTALL_DIR" ] || { log "rAthena directory not found"; return 1; }
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR"
 
-    # Fix permissions
-    log "Fixing permissions for rAthena directory..."
-    find "$RATHENA_INSTALL_DIR" -type d -exec chmod 755 {} \;     # Directories: rwxr-xr-x
-    find "$RATHENA_INSTALL_DIR" -type f -exec chmod 644 {} \;     # Files: rw-r--r--
-    find "$RATHENA_INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;  # Scripts: executable
+    log "Fixing permissions..."
+    find "$RATHENA_INSTALL_DIR" -type d -exec chmod 755 {} \;
+    find "$RATHENA_INSTALL_DIR" -type f -exec chmod 644 {} \;
+    find "$RATHENA_INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;
 
-    # Make server scripts executable if they exist
-    for script in src/map/map-server.sh src/char/char-server.sh src/login/login-server.sh; do
-        if [ -f "$RATHENA_INSTALL_DIR/$script" ]; then
-            chmod +x "$RATHENA_INSTALL_DIR/$script" || log "Failed to set executable permission for $script"
-        fi
-    done
-
-    # Enable UTF-8 support in rAthena if not already
+    # Enable UTF-8
     MMO_H_FILE="$RATHENA_INSTALL_DIR/src/common/mmo.h"
-    if [ -f "$MMO_H_FILE" ]; then
-        sed -i 's/#define UTF8 0/#define UTF8 1/' "$MMO_H_FILE"
-    fi
+    [ -f "$MMO_H_FILE" ] && sed -i 's/#define UTF8 0/#define UTF8 1/' "$MMO_H_FILE"
 
-    # Compile rAthena
-    log "Compiling rAthena (as ${RATHENA_USER})..."
+    log "Compiling rAthena..."
     if ! sudo -u "$RATHENA_USER" bash -c "cd '$RATHENA_INSTALL_DIR' && make clean && make -j\$(nproc)" &>> "$LOGFILE"; then
-        log "Compilation failed! Check log at $LOGFILE"
+        log "Compilation failed! Check $LOGFILE"
         return 1
     fi
-
-    log "rAthena compilation completed successfully."
+    log "rAthena compilation completed."
 }
-
-
 
 phase_import_sqls(){
     log "Importing SQL files..."
-
-    SQL_DIR1="${RATHENA_INSTALL_DIR}/sql"
-    SQL_DIR2="${RATHENA_HOME}/sql_imports"
-
-    # ---------- IMPORT main.sql FIRST ----------
-    for dir in "$SQL_DIR1" "$SQL_DIR2"; do
-        if [ -f "$dir/main.sql" ]; then
-            log "Importing main.sql into ${DB_RAGNAROK}..."
-            mariadb "${DB_RAGNAROK}" < "$dir/main.sql" \
-                && log "Imported main.sql" \
-                || log "Failed to import main.sql"
-        fi
-    done
-
-    # ---------- IMPORT logs.sql FIRST TO LOG DB ----------
-    for dir in "$SQL_DIR1" "$SQL_DIR2"; do
-        if [ -f "$dir/logs.sql" ]; then
-            log "Importing logs.sql into ${DB_LOGS}..."
-            mariadb "${DB_LOGS}" < "$dir/logs.sql" \
-                && log "Imported logs.sql" \
-                || log "Failed to import logs.sql"
-        fi
-    done
-
-    # ---------- IMPORT ALL OTHER SQLS ----------
-    for dir in "$SQL_DIR1" "$SQL_DIR2"; do
+    SQL_DIRS=("$RATHENA_INSTALL_DIR/sql" "$RATHENA_HOME/sql_imports")
+    for dir in "${SQL_DIRS[@]}"; do
         [ -d "$dir" ] || continue
-
         for f in "$dir"/*.sql; do
             [ -e "$f" ] || continue
-
-            base="$(basename "$f")"
-
-            # skip because already imported
-            [[ "$base" == "main.sql" ]] && continue
-            [[ "$base" == "logs.sql" ]] && continue
-
-            log "Importing $base into ${DB_RAGNAROK}..."
-            mariadb "${DB_RAGNAROK}" < "$f" \
-                && log "Imported $base" \
-                || log "Failed import $base"
+            case "$(basename "$f")" in
+                main.sql) mariadb "$DB_RAGNAROK" < "$f" && log "Imported main.sql";;
+                logs.sql) mariadb "$DB_LOGS" < "$f" && log "Imported logs.sql";;
+                *) mariadb "$DB_RAGNAROK" < "$f" && log "Imported $(basename "$f")";;
+            esac
         done
     done
-
     log "SQL import completed."
 }
 
-
 phase_generate_fluxcp_config() {
-    log "Generating FluxCP database config..."
 
-    CONF_DIR="$WEBROOT/application/config"
-    mkdir -p "$CONF_DIR"
-
-    cat > "$CONF_DIR/database.php" <<EOF
-<?php
-return [
-    'default' => [
-        'host'     => 'localhost',
-        'username' => '${DB_USER}',
-        'password' => '${DB_PASS}',
-        'database' => '${DB_FLUXCP}',
-        'dbdriver' => 'mysqli',
-        'char_set' => 'utf8mb4',
-        'dbcollat' => 'utf8mb4_unicode_ci',
-    ],
-];
-EOF
-
-    chown -R www-data:www-data "$WEBROOT"
-    log "FluxCP database.php generated."
-}
-
-
-
-phase_patch_fluxcp_settings() {
-    log "Patching FluxCP application.php and server.php..."
+log "Patching FluxCP application.php and server.php..."
 
     APPFILE="$WEBROOT/application/config/application.php"
     SRVFILE="$WEBROOT/application/config/server.php"
@@ -303,51 +226,33 @@ phase_patch_fluxcp_settings() {
     chmod -R 0774 /var/www/html
 
     log "FluxCP application.php and server.php patched."
+
+];
+EOF
+    chown -R www-data:www-data "$WEBROOT"
+    log "FluxCP database.php generated."
 }
-
-
 
 phase_generate_rathena_config(){
     log "Generating rAthena import config files..."
-
-    IMPORT_CONF_DIR="$RATHENA_INSTALL_DIR/conf/import"
-    mkdir -p "$IMPORT_CONF_DIR"
-
-    # Auto-generate USERID (6 letters), USERPASS (8 letters)
+    mkdir -p "$RATHENA_INSTALL_DIR/conf/import"
     USERID="$(tr -dc 'A-Za-z' </dev/urandom | head -c6)"
     USERPASS="$(tr -dc 'A-Za-z' </dev/urandom | head -c8)"
-
-    # Auto-detect server IP
     SERVER_IP="$(hostname -I | awk '{print $1}')"
 
-    log "Generated rAthena login: USERID=${USERID}, USERPASS=${USERPASS}, SERVER_IP=${SERVER_IP}"
-
-    # ------------------------------
-    # Write char_conf.txt
-    # ------------------------------
-    cat > "$IMPORT_CONF_DIR/char_conf.txt" <<EOF
-// Auto-generated by installer
+    cat > "$RATHENA_INSTALL_DIR/conf/import/char_conf.txt" <<EOF
 userid: ${USERID}
 passwd: ${USERPASS}
 char_ip: ${SERVER_IP}
 EOF
 
-    # ------------------------------
-    # Write map_conf.txt
-    # ------------------------------
-    cat > "$IMPORT_CONF_DIR/map_conf.txt" <<EOF
-// Auto-generated by installer
+    cat > "$RATHENA_INSTALL_DIR/conf/import/map_conf.txt" <<EOF
 userid: ${USERID}
 passwd: ${USERPASS}
 map_ip: ${SERVER_IP}
 EOF
 
-    # ------------------------------
-    # Write inter_conf.txt
-    # ------------------------------
-    cat > "$IMPORT_CONF_DIR/inter_conf.txt" <<EOF
-// Auto-generated by installer
-//use_sql_db: yes
+    cat > "$RATHENA_INSTALL_DIR/conf/import/inter_conf.txt" <<EOF
 login_server_pw: ${DB_PASS}
 ipban_db_pw: ${DB_PASS}
 char_server_pw: ${DB_PASS}
@@ -355,10 +260,7 @@ map_server_pw: ${DB_PASS}
 log_db_pw: ${DB_PASS}
 EOF
 
-    # ------------------------------
-    # Write rathena_db.conf (database settings)
-    # ------------------------------
-    cat > "$IMPORT_CONF_DIR/rathena_db.conf" <<EOF
+    cat > "$RATHENA_INSTALL_DIR/conf/import/rathena_db.conf" <<EOF
 db_ip="127.0.0.1"
 db_user="${DB_USER}"
 db_pass="${DB_PASS}"
@@ -366,28 +268,15 @@ db_database="${DB_RAGNAROK}"
 db_logs="${DB_LOGS}"
 db_fluxcp="${DB_FLUXCP}"
 EOF
-
-    # Set proper ownership
-    chown -R "${RATHENA_USER}:${RATHENA_USER}" "$IMPORT_CONF_DIR"
-
-    log "rAthena import config generated successfully."
-}
-
-
-phase_setup_phpmyadmin(){
-    log "Setting up phpMyAdmin front-end..."
-    ln -sf /usr/share/phpmyadmin /var/www/html/phpmyadmin
-    a2enconf phpmyadmin || true
-    systemctl reload apache2 || systemctl restart apache2
-    log "phpMyAdmin available at /phpmyadmin"
+    chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR/conf/import"
+    log "rAthena import config generated."
 }
 
 phase_create_serverdetails(){
-    log "Writing ServerDetails.txt to desktop..."
+    log "Writing ServerDetails.txt..."
     DETAILS_FILE="$RATHENA_HOME/Desktop/ServerDetails.txt"
     cat > "$DETAILS_FILE" <<EOF
 === rAthena Server Details ===
-
 rAthena dir: ${RATHENA_INSTALL_DIR}
 FluxCP webroot: ${WEBROOT}
 
@@ -400,13 +289,9 @@ FluxCP: http://localhost/
 
 VNC user: ${RATHENA_USER}
 VNC password: ${DEFAULT_VNC_PASSWORD}
-
-Notes:
-- Servers start only on XFCE login via VNC processes you control in the session.
-- Use ./configure --packetver=20240403 --enable-utf8 to compile correct RAGExe.
 EOF
     chown "${RATHENA_USER}:${RATHENA_USER}" "$DETAILS_FILE"
-    log "ServerDetails written."
+    log "ServerDetails.txt written."
 }
 
 phase_create_desktop_shortcuts(){
@@ -481,7 +366,7 @@ EOF
 phase_clean_all(){
     log "Cleaning previous install..."
     systemctl stop vncserver@1.service 2>/dev/null || true
-    rm -rf "$RATHENA_INSTALL_DIR" "${WEBROOT:?}/"{*,.*} "${RATHENA_HOME}/Desktop/ServerDetails.txt" 2>/dev/null || true
+    rm -rf "$RATHENA_INSTALL_DIR" "${WEBROOT:?}/"* "$RATHENA_HOME/Desktop/ServerDetails.txt" 2>/dev/null || true
     mariadb <<SQL
 DROP DATABASE IF EXISTS ${DB_RAGNAROK};
 DROP DATABASE IF EXISTS ${DB_LOGS};
@@ -494,7 +379,7 @@ SQL
 }
 
 phase_regenerate_db_password(){
-    log "Regenerating rAthena DB password..."
+    log "Regenerating DB password..."
     DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || true)"
     mariadb <<SQL
 ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
@@ -508,14 +393,10 @@ DB_LOGS='${DB_LOGS}'
 DB_FLUXCP='${DB_FLUXCP}'
 EOF
     chmod 600 "$CRED_FILE"
-    phase_generate_fluxcp_config
-    phase_generate_rathena_config
-    phase_create_serverdetails
-    echo "New DB password for ${DB_USER}: ${DB_PASS}"
+    log "DB password regenerated: ${DB_PASS}"
 }
 
-# ------------------ MAIN ------------------
-
+# ================== MAIN INSTALLER ==================
 main(){
     log "Starting full installer..."
     phase_update_upgrade
@@ -527,15 +408,13 @@ main(){
     phase_import_sqls
     phase_generate_fluxcp_config
     phase_generate_rathena_config
-    phase_setup_phpmyadmin
     phase_compile_rathena
     phase_create_serverdetails
     phase_create_desktop_shortcuts
     log "Installer finished. ServerDetails.txt on Desktop and shortcuts created."
 }
 
-# ------------------ CLI MENU ------------------
-
+# ================== CLI MENU ==================
 echo "================ rAthena Installer ================="
 echo " 1) Run full installer"
 echo " 2) Clean previous install (files + DBs + DB user)"
