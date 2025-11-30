@@ -113,37 +113,47 @@ EOF
     log "MariaDB setup complete and credentials saved to $CRED_FILE"
 }
 
-phase_compile_rathena(){
+phase_compile_rathena() {
     log "Preparing to compile rAthena (as ${RATHENA_USER})..."
 
-    # Ensure proper ownership and permissions for the rAthena directory and scripts
-    log "Fixing permissions for rAthena directory..."
-    if [ -d "$RATHENA_INSTALL_DIR" ]; then
-        chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR"
-        chmod -R 755 "$RATHENA_INSTALL_DIR"  # Set read and execute permissions for all files in the directory
-        find "$RATHENA_INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;  # Ensure all *.sh scripts are executable
-    else
+    # Ensure rAthena directory exists
+    if [ ! -d "$RATHENA_INSTALL_DIR" ]; then
         log "rAthena directory not found: $RATHENA_INSTALL_DIR"
-        return 0
+        return 1
     fi
 
-    # Ensure the server startup scripts are executable
-    if [ -d "${RATHENA_INSTALL_DIR}/src/map" ]; then
-        chmod +x "${RATHENA_INSTALL_DIR}/src/map/map-server.sh" || log "Failed to set executable permission for map-server.sh"
-    fi
-    if [ -d "${RATHENA_INSTALL_DIR}/src/char" ]; then
-        chmod +x "${RATHENA_INSTALL_DIR}/src/char/char-server.sh" || log "Failed to set executable permission for char-server.sh"
-    fi
-    if [ -d "${RATHENA_INSTALL_DIR}/src/login" ]; then
-        chmod +x "${RATHENA_INSTALL_DIR}/src/login/login-server.sh" || log "Failed to set executable permission for login-server.sh"
+    # Fix ownership
+    chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR"
+
+    # Fix permissions
+    log "Fixing permissions for rAthena directory..."
+    find "$RATHENA_INSTALL_DIR" -type d -exec chmod 755 {} \;     # Directories: rwxr-xr-x
+    find "$RATHENA_INSTALL_DIR" -type f -exec chmod 644 {} \;     # Files: rw-r--r--
+    find "$RATHENA_INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;  # Scripts: executable
+
+    # Make server scripts executable if they exist
+    for script in src/map/map-server.sh src/char/char-server.sh src/login/login-server.sh; do
+        if [ -f "$RATHENA_INSTALL_DIR/$script" ]; then
+            chmod +x "$RATHENA_INSTALL_DIR/$script" || log "Failed to set executable permission for $script"
+        fi
+    done
+
+    # Enable UTF-8 support in rAthena if not already
+    MMO_H_FILE="$RATHENA_INSTALL_DIR/src/common/mmo.h"
+    if [ -f "$MMO_H_FILE" ]; then
+        sed -i 's/#define UTF8 0/#define UTF8 1/' "$MMO_H_FILE"
     fi
 
-    # Now proceed with the compilation
+    # Compile rAthena
     log "Compiling rAthena (as ${RATHENA_USER})..."
-    sudo -u "$RATHENA_USER" bash -c "cd '$RATHENA_INSTALL_DIR' && ./configure --enable-utf8 && make clean && make -j\$(nproc)" || log "Compilation failed (check logs)"
+    if ! sudo -u "$RATHENA_USER" bash -c "cd '$RATHENA_INSTALL_DIR' && make clean && make -j\$(nproc)" &>> "$LOGFILE"; then
+        log "Compilation failed! Check log at $LOGFILE"
+        return 1
+    fi
 
-    log "Compile step completed (or failed with non-fatal error logged)."
+    log "rAthena compilation completed successfully."
 }
+
 
 
 phase_import_sqls(){
