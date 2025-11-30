@@ -119,7 +119,7 @@ phase_compile_rathena(){
         log "rAthena directory not found: $RATHENA_INSTALL_DIR"
         return 0
     fi
-    sudo -u "$RATHENA_USER" bash -lc "cd '${RATHENA_INSTALL_DIR}' && ./configure --enable-packetver=20250604 --enable-utf8 && make clean && make -j\$(nproc)" || log "Compilation failed (check logs)"
+    sudo -u "$RATHENA_USER" bash -lc "cd '${RATHENA_INSTALL_DIR}' && ./configure --enable-utf8 && make clean && make -j\$(nproc)" || log "Compilation failed (check logs)"
     log "Compile step completed (or failed with non-fatal error logged)."
 }
 
