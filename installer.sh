@@ -17,7 +17,6 @@ DB_RAGNAROK="ragnarok"
 DB_LOGS="ragnarok_logs"
 DB_FLUXCP="fluxcp"
 
-VNC_FIXER="./vnc_fixer.sh"
 CRED_FILE="/root/.rathena_db_credentials"
 
 mkdir -p "$(dirname "$LOGFILE")" "$STATE_DIR"
@@ -28,9 +27,10 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
 apt_install(){ DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends "$@"; }
 
-# ------------------ LOAD EXISTING DB CREDENTIALS ------------------
+# ------------------ LOAD / GENERATE DB CREDENTIALS ------------------
 if [ -f "$CRED_FILE" ]; then
     log "Loading existing DB credentials from $CRED_FILE"
+    # shellcheck disable=SC1090
     source "$CRED_FILE"
 else
     log "No existing DB credentials found. Generating new password..."
@@ -52,21 +52,23 @@ phase_install_packages(){
       wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring \
       mariadb-server mariadb-client \
       dbus-x11 xauth xorg ufw tightvncserver xfce4 xfce4-goodies x11-xserver-utils \
-      phpmyadmin imagemagick xterm xfce4-terminal htop xdg-utils
+      phpmyadmin imagemagick xterm xfce4-terminal htop xdg-utils dos2unix
     log "Base packages installed."
 }
 
 phase_install_chrome(){
     log "Installing Google Chrome..."
     if wget -O /tmp/chrome.deb "$CHROME_URL"; then
-        apt install -y /tmp/chrome.deb && rm -f /tmp/chrome.deb && return
+        apt install -y /tmp/chrome.deb && rm -f /tmp/chrome.deb
+        log "Google Chrome installed."
+        return
     fi
     log "Falling back to Chromium..."
     apt_install chromium || log "No browser installed."
 }
 
 phase_create_rathena_user(){
-    log "Creating user ${RATHENA_USER}..."
+    log "Creating user ${RATHENA_USER} (if missing)..."
     if ! id "$RATHENA_USER" &>/dev/null; then
         useradd -m -s /bin/bash "$RATHENA_USER"
         echo "${RATHENA_USER}:${DEFAULT_VNC_PASSWORD}" | chpasswd
@@ -74,15 +76,16 @@ phase_create_rathena_user(){
     mkdir -p "${RATHENA_HOME}/Desktop" "${RATHENA_HOME}/.config/autostart" \
              "${RATHENA_HOME}/sql_imports" "${RATHENA_HOME}/db_backups"
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_HOME"
+    log "User ${RATHENA_USER} prepared."
 }
 
 phase_clone_repos(){
     log "Cloning rAthena..."
     rm -rf "$RATHENA_INSTALL_DIR"
-    sudo -u "$RATHENA_USER" git clone --depth 1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR"
-    log "Cloning FluxCP..."
+    sudo -u "$RATHENA_USER" git clone --depth 1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" || log "Failed to clone rAthena"
+    log "Cloning FluxCP into ${WEBROOT}..."
     rm -rf "${WEBROOT:?}/"{*,.*} 2>/dev/null || true
-    git clone --depth 1 https://github.com/rathena/FluxCP.git "$WEBROOT"
+    git clone --depth 1 https://github.com/rathena/FluxCP.git "$WEBROOT" || log "Failed to clone FluxCP"
     chown -R www-data:www-data "$WEBROOT"
 }
 
@@ -107,20 +110,23 @@ DB_LOGS='${DB_LOGS}'
 DB_FLUXCP='${DB_FLUXCP}'
 EOF
     chmod 600 "$CRED_FILE"
+    log "MariaDB setup complete and credentials saved to $CRED_FILE"
 }
 
 phase_import_sqls(){
-    log "Importing SQLs..."
+    log "Importing SQLs (if any) into ${DB_RAGNAROK}..."
     for dir in "$RATHENA_INSTALL_DIR/sql" "${RATHENA_HOME}/sql_imports"; do
         [ -d "$dir" ] || continue
         for f in "$dir"/*.sql; do
             [ -e "$f" ] || continue
             mariadb "${DB_RAGNAROK}" < "$f" || log "Failed import $f"
+            log "Imported $f"
         done
     done
 }
 
 phase_generate_fluxcp_config(){
+    log "Generating FluxCP database config..."
     CONF_DIR="$WEBROOT/application/config"
     mkdir -p "$CONF_DIR"
     cat > "$CONF_DIR/database.php" <<EOF
@@ -137,9 +143,11 @@ phase_generate_fluxcp_config(){
 ];
 EOF
     chown -R www-data:www-data "$WEBROOT"
+    log "FluxCP config generated."
 }
 
 phase_generate_rathena_config(){
+    log "Generating rAthena import config..."
     IMPORT_CONF_DIR="$RATHENA_INSTALL_DIR/conf/import"
     mkdir -p "$IMPORT_CONF_DIR"
     cat > "$IMPORT_CONF_DIR/rathena_db.conf" <<EOF
@@ -150,22 +158,30 @@ db_database="${DB_RAGNAROK}"
 db_logs="${DB_LOGS}"
 db_fluxcp="${DB_FLUXCP}"
 EOF
+    chown -R "${RATHENA_USER}:${RATHENA_USER}" "$IMPORT_CONF_DIR"
+    log "rAthena import config generated."
 }
 
 phase_setup_phpmyadmin(){
-    log "Setting up phpMyAdmin..."
+    log "Setting up phpMyAdmin front-end..."
     ln -sf /usr/share/phpmyadmin /var/www/html/phpmyadmin
     a2enconf phpmyadmin || true
-    systemctl reload apache2
+    systemctl reload apache2 || systemctl restart apache2
+    log "phpMyAdmin available at /phpmyadmin"
 }
 
 phase_compile_rathena(){
-    log "Compiling rAthena..."
-    cd "$RATHENA_INSTALL_DIR"
-    sudo -u "$RATHENA_USER" bash -lc " ./configure --enable-utf8 && make clean && make -j\$(nproc)" || true
+    log "Compiling rAthena (as ${RATHENA_USER})..."
+    if [ ! -d "$RATHENA_INSTALL_DIR" ]; then
+        log "rAthena directory not found: $RATHENA_INSTALL_DIR"
+        return 0
+    fi
+    sudo -u "$RATHENA_USER" bash -lc "cd '${RATHENA_INSTALL_DIR}' && ./configure --enable-utf8 --packetver=20240403 && make clean && make -j\$(nproc)" || log "Compilation failed (check logs)"
+    log "Compile step completed (or failed with non-fatal error logged)."
 }
 
 phase_create_serverdetails(){
+    log "Writing ServerDetails.txt to desktop..."
     DETAILS_FILE="$RATHENA_HOME/Desktop/ServerDetails.txt"
     cat > "$DETAILS_FILE" <<EOF
 === rAthena Server Details ===
@@ -178,26 +194,28 @@ DB password: ${DB_PASS}
 Databases: ${DB_RAGNAROK}, ${DB_LOGS}, ${DB_FLUXCP}
 
 phpMyAdmin: http://localhost/phpmyadmin
+FluxCP: http://localhost/
 
 VNC user: ${RATHENA_USER}
 VNC password: ${DEFAULT_VNC_PASSWORD}
 
 Notes:
-- Servers start only on XFCE login via VNC.
-- Use ./configure --packetver=20240403 to compile correct RAGExe.
+- Servers start only on XFCE login via VNC processes you control in the session.
+- Use ./configure --packetver=20240403 --enable-utf8 to compile correct RAGExe.
 EOF
     chown "${RATHENA_USER}:${RATHENA_USER}" "$DETAILS_FILE"
+    log "ServerDetails written."
 }
 
 phase_create_desktop_shortcuts(){
-    log "Creating desktop shortcuts..."
-    DESKTOP_DIR="${RATHENA_HOME}/Desktop"
-    mkdir -p "$DESKTOP_DIR"
-    chown -R "${RATHENA_USER}:${RATHENA_USER}" "$DESKTOP_DIR"
+  log "Creating desktop shortcuts (using system icons)..."
+  DESKTOP_DIR="${RATHENA_HOME}/Desktop"
+  mkdir -p "$DESKTOP_DIR"
+  chown -R "${RATHENA_USER}:${RATHENA_USER}" "$DESKTOP_DIR" "${RATHENA_HOME}/db_backups"
 
-    write_desktop(){
-        file="$1"; name="$2"; cmd="$3"; icon="$4"; terminal="${5:-false}"
-        cat > "${DESKTOP_DIR}/${file}" <<EOF
+  write_desktop(){
+    file="$1"; name="$2"; cmd="$3"; icon="$4"; terminal="${5:-false}"
+    cat > "${DESKTOP_DIR}/${file}" <<EOF
 [Desktop Entry]
 Version=1.0
 Name=${name}
@@ -206,20 +224,62 @@ Terminal=${terminal}
 Type=Application
 Icon=${icon}
 EOF
-        chmod +x "${DESKTOP_DIR}/${file}"
-        chown "${RATHENA_USER}:${RATHENA_USER}" "${DESKTOP_DIR}/${file}"
-        log "Created ${DESKTOP_DIR}/${file}"
-    }
+    chmod +x "${DESKTOP_DIR}/${file}"
+    chown "${RATHENA_USER}:${RATHENA_USER}" "${DESKTOP_DIR}/${file}"
+    log "Created ${DESKTOP_DIR}/${file}"
+  }
 
-    write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
-      "bash -lc 'su - ${RATHENA_USER} -c \"cd ${RATHENA_INSTALL_DIR} && ./configure --packetver=20240403 --enable-utf8 && make clean && make -j\$(nproc)\"'" "applications-development" true
-    write_desktop "Open_phpMyAdmin.desktop" "Open phpMyAdmin" "xdg-open http://localhost/phpmyadmin" "applications-internet" false
+  write_desktop "Terminal.desktop" "Terminal" \
+    "xfce4-terminal" \
+    "utilities-terminal" false
+
+  write_desktop "Edit_rAthena_Configs.desktop" "Edit rAthena Configs" \
+    "xdg-open ${RATHENA_INSTALL_DIR}/conf" \
+    "text-editor" false
+
+  write_desktop "System_Monitor.desktop" "System Monitor" \
+    "xfce4-terminal --command='htop'" \
+    "utilities-system-monitor" true
+
+  write_desktop "Start_All_Servers.desktop" "Start All Servers" \
+    "bash -lc '${RATHENA_HOME}/start_servers_xfce.sh'" \
+    "media-playback-start" false
+
+  write_desktop "Stop_All_Servers.desktop" "Stop All Servers" \
+    "bash -lc '${RATHENA_HOME}/stop_servers_xfce.sh'" \
+    "media-playback-stop" false
+
+  write_desktop "Restart_All_Servers.desktop" "Restart All Servers" \
+    "bash -lc '${RATHENA_HOME}/restart_servers_xfce.sh'" \
+    "view-refresh" false
+
+  write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
+    "bash -lc 'cd ${RATHENA_INSTALL_DIR} && ./configure --enable-utf8 --packetver=20240403 && make clean && make -j\$(nproc)'" \
+    "applications-development" true
+
+  write_desktop "Change_VNC_Password.desktop" "Change VNC Password" \
+    "bash -lc 'vncpasswd'" \
+    "dialog-password" false
+
+  write_desktop "Open_FluxCP.desktop" "Open FluxCP" \
+    "xdg-open http://localhost/" \
+    "internet-web-browser" false
+
+  write_desktop "Open_phpMyAdmin.desktop" "Open phpMyAdmin" \
+    "xdg-open http://localhost/phpmyadmin" \
+    "applications-internet" false
+
+  write_desktop "Backup_rAthena_DB.desktop" "Backup rAthena DB" \
+    "bash -lc 'mysqldump -u ${DB_USER} -p\"${DB_PASS}\" ${DB_RAGNAROK} > ${RATHENA_HOME}/db_backups/ragnarok_\$(date +%F).sql && notify-send \"Backup complete\"'" \
+    "document-save" false
+
+  log "Desktop shortcuts created."
 }
 
 phase_clean_all(){
     log "Cleaning previous install..."
     systemctl stop vncserver@1.service 2>/dev/null || true
-    rm -rf "$RATHENA_INSTALL_DIR" "${WEBROOT:?}/"{*,.*} "${RATHENA_HOME}/Desktop/ServerDetails.txt"
+    rm -rf "$RATHENA_INSTALL_DIR" "${WEBROOT:?}/"{*,.*} "${RATHENA_HOME}/Desktop/ServerDetails.txt" 2>/dev/null || true
     mariadb <<SQL
 DROP DATABASE IF EXISTS ${DB_RAGNAROK};
 DROP DATABASE IF EXISTS ${DB_LOGS};
