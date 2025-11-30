@@ -120,22 +120,15 @@ phase_compile_rathena() {
 
     [ -d "$RATHENA_INSTALL_DIR" ] || { log "rAthena directory not found"; return 1; }
 
-    # Ensure proper ownership
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR"
 
-    # Fix permissions: dirs 755, files 644, scripts executable
-    find "$RATHENA_INSTALL_DIR" -type d -exec chmod 755 {} \;
-    find "$RATHENA_INSTALL_DIR" -type f -exec chmod 644 {} \;
-    find "$RATHENA_INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;
-
-    # Compile rAthena
-    if ! sudo -u "$RATHENA_USER" make -C "$RATHENA_INSTALL_DIR" clean -j"$(nproc)" &>> "$LOGFILE"; then
-        log "Compilation failed! See $LOGFILE"
-        return 1
-    fi
+    cd "$RATHENA_INSTALL_DIR"
+    make clean &>> "$LOGFILE"
+    make -j"$(nproc)" &>> "$LOGFILE" || { log "Compilation failed! See $LOGFILE"; return 1; }
 
     log "rAthena compiled successfully."
 }
+
 
 
 phase_import_sqls(){
