@@ -118,7 +118,6 @@ phase_setup_mariadb(){
     exit 1
   fi
 
-  # Use unix_socket root auth, no password
   mariadb <<SQL
 CREATE DATABASE IF NOT EXISTS ${DB_RAGNAROK}
   DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
@@ -164,6 +163,59 @@ phase_import_sqls(){
   done
 
   log "SQL import step done."
+}
+
+phase_generate_rathena_config(){
+  log "Generating rAthena config files in conf/import..."
+
+  CONF_IMPORT_DIR="$RATHENA_INSTALL_DIR/conf/import"
+  mkdir -p "$CONF_IMPORT_DIR"
+  
+  PUBLIC_IP=$(curl -s https://ipinfo.io/ip || echo "127.0.0.1")
+  
+  cat > "$CONF_IMPORT_DIR/char_athena.conf" <<EOF
+// rAthena char-server config
+login_ip = "$PUBLIC_IP"
+login_port = 6900
+char_port  = 6121
+char_db_host = "localhost"
+char_db_port = 3306
+char_db_user = "${DB_USER}"
+char_db_pass = "${DB_PASS}"
+char_db_database = "${DB_RAGNAROK}"
+log_db_host = "localhost"
+log_db_port = 3306
+log_db_user = "${DB_USER}"
+log_db_pass = "${DB_PASS}"
+log_db_database = "${DB_LOGS}"
+EOF
+
+  cat > "$CONF_IMPORT_DIR/login_athena.conf" <<EOF
+// rAthena login-server config
+login_port  = 5121
+char_ip     = "$PUBLIC_IP"
+char_port   = 6121
+login_db_host = "localhost"
+login_db_port = 3306
+login_db_user = "${DB_USER}"
+login_db_pass = "${DB_PASS}"
+login_db_database = "${DB_RAGNAROK}"
+EOF
+
+  cat > "$CONF_IMPORT_DIR/map_athena.conf" <<EOF
+// rAthena map-server config
+map_port   = 5121
+char_ip    = "$PUBLIC_IP"
+char_port  = 6121
+map_db_host = "localhost"
+map_db_port = 3306
+map_db_user = "${DB_USER}"
+map_db_pass = "${DB_PASS}"
+map_db_database = "${DB_RAGNAROK}"
+EOF
+
+  chown -R "${RATHENA_USER}:${RATHENA_USER}" "$CONF_IMPORT_DIR"
+  log "rAthena config files generated in $CONF_IMPORT_DIR."
 }
 
 phase_generate_fluxcp_config(){
@@ -243,16 +295,12 @@ phase_setup_ufw(){
 
 phase_create_start_stop_scripts_and_autostart(){
   log "Creating start/stop helper scripts and XFCE autostart entry..."
-
-  # start_servers_xfce.sh - runs only when the rathena user logs into XFCE (VNC)
   START_SCRIPT="${RATHENA_HOME}/start_servers_xfce.sh"
   cat > "$START_SCRIPT" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 RATHENA_HOME="$HOME"
 RATHENA_DIR="${RATHENA_HOME}/Desktop/rathena"
-
-# If already started (detect process), skip starting
 if pgrep -f "athena-start" >/dev/null 2>&1; then
   echo "rAthena appears to be already started (athena-start found). Opening log terminals..."
 else
@@ -297,7 +345,6 @@ SH
   chmod +x "$START_SCRIPT"
   chown "${RATHENA_USER}:${RATHENA_USER}" "$START_SCRIPT"
 
-  # stop script
   STOP_SCRIPT="${RATHENA_HOME}/stop_servers_xfce.sh"
   cat > "$STOP_SCRIPT" <<'SH'
 #!/usr/bin/env bash
@@ -314,7 +361,6 @@ SH
   chmod +x "$STOP_SCRIPT"
   chown "${RATHENA_USER}:${RATHENA_USER}" "$STOP_SCRIPT"
 
-  # restart (stop then start)
   RESTART_SCRIPT="${RATHENA_HOME}/restart_servers_xfce.sh"
   cat > "$RESTART_SCRIPT" <<'SH'
 #!/usr/bin/env bash
@@ -364,7 +410,6 @@ EOF
     log "Created ${DESKTOP_DIR}/${file}"
   }
 
-  # Terminal / configs / monitor
   write_desktop "Terminal.desktop" "Terminal" \
     "xfce4-terminal" \
     "utilities-terminal" false
@@ -377,7 +422,6 @@ EOF
     "xterm -e 'htop || top'" \
     "utilities-system-monitor" true
 
-  # Start/stop servers
   write_desktop "Start_All_Servers.desktop" "Start All Servers" \
     "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/start_servers_xfce.sh\"'" \
     "media-playback-start" false
@@ -394,7 +438,6 @@ EOF
     "bash -lc 'cd ${RATHENA_INSTALL_DIR} && make -j\$(nproc) || true'" \
     "applications-development" true
 
-  # VNC helpers
   write_desktop "Change_VNC_Password.desktop" "Change VNC Password" \
     "bash -lc 'su - ${RATHENA_USER} -c \"vncpasswd\"'" \
     "dialog-password" false
@@ -407,7 +450,6 @@ EOF
     "systemctl stop vncserver@1.service" \
     "process-stop" false
 
-  # Web tools
   write_desktop "Open_FluxCP.desktop" "Open FluxCP" \
     "xdg-open http://localhost/" \
     "internet-web-browser" false
@@ -416,7 +458,6 @@ EOF
     "xdg-open http://localhost/phpmyadmin" \
     "applications-internet" false
 
-  # DB backup
   write_desktop "Backup_rAthena_DB.desktop" "Backup rAthena DB" \
     "bash -lc 'su - ${RATHENA_USER} -c \"mysqldump -u ${DB_USER} -p\\\"${DB_PASS}\\\" ${DB_RAGNAROK} > ${RATHENA_HOME}/db_backups/ragnarok_\$(date +%F).sql && echo Backup done\"'" \
     "document-save" false
@@ -439,11 +480,9 @@ phase_clean_all(){
 
   systemctl stop vncserver@1.service 2>/dev/null || true
 
-  # Remove files
   rm -rf "$RATHENA_INSTALL_DIR"
   rm -rf "${WEBROOT:?}"/*
 
-  # Drop DBs and user
   if cmd_exists mariadb; then
     systemctl start mariadb 2>/dev/null || true
     log "Dropping MariaDB databases and user..."
@@ -473,8 +512,8 @@ DB user:             ${DB_USER}
 DB password:         ${DB_PASS}
 DBs created:         ${DB_RAGNAROK}, ${DB_LOGS}, ${DB_FLUXCP}
 
- DB root: still uses unix_socket (login with: sudo mariadb)
- Cred file: /root/.rathena_db_credentials
+DB root: still uses unix_socket (login with: sudo mariadb)
+Cred file: /root/.rathena_db_credentials
 
 Desktop shortcuts:   ${RATHENA_HOME}/Desktop
 XFCE autostart:      ${RATHENA_HOME}/.config/autostart/rathena-autostart.desktop
@@ -497,6 +536,7 @@ main(){
   phase_clone_repos
   phase_setup_mariadb
   phase_import_sqls
+  phase_generate_rathena_config
   phase_generate_fluxcp_config
   phase_compile_rathena
   phase_create_vnc_service
@@ -510,7 +550,6 @@ main(){
 
 # --- CLI / MENU ---
 
-# Direct args still supported
 if [ "${1:-}" = "run" ]; then
   main
   exit 0
@@ -521,7 +560,6 @@ if [ "${1:-}" = "clean" ]; then
   exit 0
 fi
 
-# Interactive menu (default)
 echo
 echo "================ rAthena Installer ================="
 echo " 1) Run full installer"
