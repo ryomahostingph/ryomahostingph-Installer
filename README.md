@@ -43,7 +43,7 @@ apt-get install -y dos2unix curl git && \
 git clone https://github.com/ryomahostingph/ryomahostingph-Installer.git && \
 cd ryomahostingph-Installer && \
 dos2unix *.sh && \
-chmod +x installer.sh && \
+chmod +x *.sh && \
 ./installer.sh
 
 
