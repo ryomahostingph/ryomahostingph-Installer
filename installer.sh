@@ -116,27 +116,27 @@ EOF
 }
 
 phase_compile_rathena() {
-    log "Preparing to compile rAthena (as ${RATHENA_USER})..."
+    log "Compiling rAthena (as ${RATHENA_USER})..."
 
     [ -d "$RATHENA_INSTALL_DIR" ] || { log "rAthena directory not found"; return 1; }
+
+    # Ensure proper ownership
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR"
 
-    log "Fixing permissions..."
+    # Fix permissions: dirs 755, files 644, scripts executable
     find "$RATHENA_INSTALL_DIR" -type d -exec chmod 755 {} \;
     find "$RATHENA_INSTALL_DIR" -type f -exec chmod 644 {} \;
     find "$RATHENA_INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;
 
-    # Enable UTF-8
-    MMO_H_FILE="$RATHENA_INSTALL_DIR/src/common/mmo.h"
-    [ -f "$MMO_H_FILE" ] && sed -i 's/#define UTF8 0/#define UTF8 1/' "$MMO_H_FILE"
-
-    log "Compiling rAthena..."
-    if ! sudo -u "$RATHENA_USER" bash -c "cd '$RATHENA_INSTALL_DIR' && make clean && make -j\$(nproc)" &>> "$LOGFILE"; then
-        log "Compilation failed! Check $LOGFILE"
+    # Compile rAthena
+    if ! sudo -u "$RATHENA_USER" make -C "$RATHENA_INSTALL_DIR" clean -j"$(nproc)" &>> "$LOGFILE"; then
+        log "Compilation failed! See $LOGFILE"
         return 1
     fi
-    log "rAthena compilation completed."
+
+    log "rAthena compiled successfully."
 }
+
 
 phase_import_sqls(){
     log "Importing SQL files..."
