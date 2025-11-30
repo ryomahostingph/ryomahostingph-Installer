@@ -364,9 +364,36 @@ EOF
 }
 
 phase_clean_all(){
-    log "Cleaning previous install..."
+    log "Cleaning previous rAthena installation completely..."
+
+    # Stop VNC server if running
     systemctl stop vncserver@1.service 2>/dev/null || true
-    rm -rf "$RATHENA_INSTALL_DIR" "${WEBROOT:?}/"* "$RATHENA_HOME/Desktop/ServerDetails.txt" 2>/dev/null || true
+
+    # Remove rAthena installation folder
+    rm -rf "$RATHENA_INSTALL_DIR" 2>/dev/null || true
+
+    # Remove FluxCP files
+    if [ -d "$WEBROOT" ]; then
+        rm -rf "${WEBROOT:?}/"* "${WEBROOT:?}/".* 2>/dev/null || true
+    fi
+
+    # Remove Desktop details and shortcuts
+    rm -f "$RATHENA_HOME/Desktop/ServerDetails.txt"
+    rm -f "$RATHENA_HOME/Desktop/"*.desktop
+
+    # Remove DB backups and import folders
+    rm -rf "$RATHENA_HOME/db_backups" "$RATHENA_HOME/sql_imports"
+
+    # Remove autostart configs
+    rm -rf "$RATHENA_HOME/.config/autostart"
+
+    # Remove hidden VNC config
+    rm -rf "$RATHENA_HOME/.vnc"
+
+    # Remove rAthena DB credentials file
+    rm -f "$CRED_FILE"
+
+    # Drop MariaDB databases and user
     mariadb <<SQL
 DROP DATABASE IF EXISTS ${DB_RAGNAROK};
 DROP DATABASE IF EXISTS ${DB_LOGS};
@@ -374,9 +401,10 @@ DROP DATABASE IF EXISTS ${DB_FLUXCP};
 DROP USER IF EXISTS '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 SQL
-    rm -f "$CRED_FILE"
-    log "Clean complete."
+
+    log "Clean complete. All rAthena files, databases, and user credentials removed."
 }
+
 
 phase_regenerate_db_password(){
     log "Regenerating DB password..."
