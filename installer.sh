@@ -162,7 +162,7 @@ phase_setup_phpmyadmin(){
 phase_compile_rathena(){
     log "Compiling rAthena..."
     cd "$RATHENA_INSTALL_DIR"
-    sudo -u "$RATHENA_USER" bash -lc "./configure --packetver=20240403 --enable-utf8 && make clean && make -j\$(nproc)" || true
+    sudo -u "$RATHENA_USER" bash -lc " ./configure --enable-utf8 && make clean && make -j\$(nproc)" || true
 }
 
 phase_create_serverdetails(){
