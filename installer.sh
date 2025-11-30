@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Advanced rAthena installer (final)
+# Advanced rAthena installer (final, default icons)
 # - Uses ./athena-start start/stop and XFCE autostart for visible VNC terminals
 # - Uses MariaDB unix_socket auth (no root password touch)
+# - Uses system/default icons for desktop shortcuts
 # Run as root
 
 LOGFILE="/var/log/rathena_installer_final.log"
@@ -12,7 +13,6 @@ RATHENA_HOME="/home/${RATHENA_USER}"
 RATHENA_REPO="https://github.com/rathena/rathena.git"
 RATHENA_INSTALL_DIR="${RATHENA_HOME}/Desktop/rathena"
 WEBROOT="/var/www/html"
-ICON_DIR="${RATHENA_HOME}/.icons"
 STATE_DIR="/opt/rathena_installer_state"
 DEFAULT_VNC_PASSWORD="Ch4ng3me"
 CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
@@ -26,7 +26,7 @@ DB_FLUXCP="fluxcp"
 
 VNC_FIXER="./vnc_fixer.sh"
 
-mkdir -p "$(dirname "$LOGFILE")" "$STATE_DIR" "$ICON_DIR"
+mkdir -p "$(dirname "$LOGFILE")" "$STATE_DIR"
 touch "$LOGFILE" || true
 chmod 600 "$LOGFILE" 2>/dev/null || true
 
@@ -50,14 +50,35 @@ phase_update_upgrade(){
 }
 
 phase_install_packages(){
-  log "Installing packages..."
+  log "Installing base packages..."
   apt_install build-essential git cmake autoconf libssl-dev \
     libmariadb-dev-compat libmariadb-dev libpcre3-dev zlib1g-dev libxml2-dev \
     wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring \
     mariadb-server mariadb-client \
     dbus-x11 xauth xorg ufw tightvncserver xfce4 xfce4-goodies x11-xserver-utils \
-    phpmyadmin imagemagick xterm xfce4-terminal htop
-  log "Packages installed."
+    phpmyadmin imagemagick xterm xfce4-terminal htop xdg-utils
+  log "Base packages installed."
+}
+
+phase_install_chrome(){
+  log "Installing Google Chrome (or Chromium fallback)..."
+  if wget -O /tmp/chrome.deb "$CHROME_URL"; then
+    if apt install -y /tmp/chrome.deb; then
+      log "Google Chrome installed successfully."
+      rm -f /tmp/chrome.deb
+      return
+    else
+      log "Chrome .deb install failed, will try Chromium..."
+    fi
+  else
+    log "Failed to download Chrome .deb, will try Chromium..."
+  fi
+
+  if apt_install chromium; then
+    log "Chromium installed as fallback browser."
+  else
+    log "Failed to install any GUI browser. You may need to install one manually."
+  fi
 }
 
 phase_create_rathena_user(){
@@ -70,7 +91,7 @@ phase_create_rathena_user(){
     log "User ${RATHENA_USER} exists."
   fi
 
-  mkdir -p "${RATHENA_HOME}/Desktop" "${RATHENA_HOME}/.config/autostart" "${RATHENA_HOME}/sql_imports"
+  mkdir -p "${RATHENA_HOME}/Desktop" "${RATHENA_HOME}/.config/autostart" "${RATHENA_HOME}/sql_imports" "${RATHENA_HOME}/db_backups"
   chown -R "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}"
 }
 
@@ -120,7 +141,7 @@ DB_PASS='${DB_PASS}'
 DB_RAGNAROK='${DB_RAGNAROK}'
 DB_LOGS='${DB_LOGS}'
 DB_FLUXCP='${DB_FLUXCP}'
-# Root still uses unix_socket (sudo mariadb)
+# Root still uses unix_socket (login with: sudo mariadb)
 EOF
   chmod 600 "$CRED_FILE"
   log "MariaDB DBs/users created. Creds saved to $CRED_FILE"
@@ -135,7 +156,9 @@ phase_import_sqls(){
       for f in "$d"/*.sql; do
         [ -e "$f" ] || continue
         log "Importing $f into ${DB_RAGNAROK}..."
-        mariadb "${DB_RAGNAROK}" < "$f" || log "Import failed for $f"
+        if ! mariadb "${DB_RAGNAROK}" < "$f"; then
+          log "Import failed for $f"
+        fi
       done
     fi
   done
@@ -216,52 +239,6 @@ phase_setup_ufw(){
   ufw allow 5901/tcp
   ufw --force enable || true
   log "UFW configured."
-}
-
-phase_generate_icons(){
-  log "Generating icons into ${ICON_DIR}..."
-  mkdir -p "$ICON_DIR"
-  chown -R "${RATHENA_USER}:${RATHENA_USER}" "$ICON_DIR"
-
-  create_icon(){
-    name="$1"; label="$2"; bgcolor="$3"
-    svg="$(mktemp --suffix=.svg)"
-    png="${ICON_DIR}/${name}.png"
-    cat > "$svg" <<SVG
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256">
-  <rect width="100%" height="100%" rx="32" ry="32" fill="${bgcolor}" />
-  <text x="50%" y="54%" font-family="DejaVu Sans, Arial" font-size="72" fill="#FFFFFF" text-anchor="middle" dominant-baseline="middle">${label}</text>
-</svg>
-SVG
-    if cmd_exists convert; then
-      convert -background none -resize 64x64 "$svg" "$png" || cp "$svg" "${ICON_DIR}/${name}.svg"
-    else
-      cp "$svg" "${ICON_DIR}/${name}.svg"
-    fi
-    rm -f "$svg"
-    chown "${RATHENA_USER}:${RATHENA_USER}" "$png" 2>/dev/null || true
-    log "Icon created: $png"
-  }
-
-  create_icon "recompile" "RC" "#3b82f6"
-  create_icon "start" "▶" "#10b981"
-  create_icon "stop" "■" "#ef4444"
-  create_icon "restart" "⟳" "#f59e0b"
-  create_icon "edit_configs" "✎" "#8b5cf6"
-  create_icon "fluxcp" "🌐" "#06b6d4"
-  create_icon "phpmyadmin" "DB" "#6366f1"
-  create_icon "backup_db" "⇪" "#f97316"
-  create_icon "restore_db" "♻" "#06b6d4"
-  create_icon "change_vnc" "🔒" "#0ea5a4"
-  create_icon "vnc_start" "🖥" "#60a5fa"
-  create_icon "vnc_stop" "✖" "#ef4444"
-  create_icon "sysmon" "📊" "#8b5cf6"
-  create_icon "terminal" "⌨" "#64748b"
-  create_icon "start_all" "All" "#06b6d4"
-  create_icon "stop_all" "Off" "#ef4444"
-  create_icon "restart_all" "R" "#f59e0b"
-
-  log "Icons generated."
 }
 
 phase_create_start_stop_scripts_and_autostart(){
@@ -366,14 +343,10 @@ EOF
 }
 
 phase_create_desktop_shortcuts(){
-  log "Creating desktop shortcuts..."
+  log "Creating desktop shortcuts (using system icons)..."
   DESKTOP_DIR="${RATHENA_HOME}/Desktop"
   mkdir -p "$DESKTOP_DIR"
-  chown -R "${RATHENA_USER}:${RATHENA_USER}" "$DESKTOP_DIR"
-
-  # db backup dir
-  mkdir -p "${RATHENA_HOME}/db_backups"
-  chown -R "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/db_backups"
+  chown -R "${RATHENA_USER}:${RATHENA_USER}" "$DESKTOP_DIR" "${RATHENA_HOME}/db_backups"
 
   write_desktop(){
     file="$1"; name="$2"; cmd="$3"; icon="$4"; terminal="${5:-false}"
@@ -384,64 +357,69 @@ Name=${name}
 Exec=${cmd}
 Terminal=${terminal}
 Type=Application
-Icon=${ICON_DIR}/${icon}.png
+Icon=${icon}
 EOF
     chmod +x "${DESKTOP_DIR}/${file}"
     chown "${RATHENA_USER}:${RATHENA_USER}" "${DESKTOP_DIR}/${file}"
     log "Created ${DESKTOP_DIR}/${file}"
   }
 
-  write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
-    "bash -lc 'cd ${RATHENA_INSTALL_DIR} && make -j\$(nproc) || true'" \
-    "recompile" true
+  # Terminal / configs / monitor
+  write_desktop "Terminal.desktop" "Terminal" \
+    "xfce4-terminal" \
+    "utilities-terminal" false
 
-  write_desktop "Start_All.desktop" "Start All Servers" \
-    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/start_servers_xfce.sh\"'" \
-    "start_all" false
-
-  write_desktop "Stop_All.desktop" "Stop All Servers" \
-    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/stop_servers_xfce.sh\"'" \
-    "stop_all" false
-
-  write_desktop "Restart_All.desktop" "Restart All Servers" \
-    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/restart_servers_xfce.sh\"'" \
-    "restart_all" false
-
-  write_desktop "Edit_Configs.desktop" "Edit rAthena Configs" \
+  write_desktop "Edit_rAthena_Configs.desktop" "Edit rAthena Configs" \
     "bash -lc 'xdg-open ${RATHENA_INSTALL_DIR}/conf || xterm -e \"ls -la ${RATHENA_INSTALL_DIR}/conf\"'" \
-    "edit_configs" false
-
-  write_desktop "Open_FluxCP.desktop" "Open FluxCP" \
-    "xdg-open http://localhost/" \
-    "fluxcp" false
-
-  write_desktop "Open_phpMyAdmin.desktop" "Open phpMyAdmin" \
-    "xdg-open http://localhost/phpmyadmin" \
-    "phpmyadmin" false
-
-  write_desktop "Backup_DB.desktop" "Backup rAthena DB" \
-    "bash -lc 'su - ${RATHENA_USER} -c \"mysqldump -u ${DB_USER} -p\\\"${DB_PASS}\\\" ${DB_RAGNAROK} > ${RATHENA_HOME}/db_backups/ragnarok_\$(date +%F).sql && echo Backup done\"'" \
-    "backup_db" false
-
-  write_desktop "Change_VNC_Password.desktop" "Change VNC Password" \
-    "bash -lc 'su - ${RATHENA_USER} -c \"vncpasswd\"'" \
-    "change_vnc" false
-
-  write_desktop "VNC_Start.desktop" "Start VNC Server" \
-    "systemctl start vncserver@1.service" \
-    "vnc_start" false
-
-  write_desktop "VNC_Stop.desktop" "Stop VNC Server" \
-    "systemctl stop vncserver@1.service" \
-    "vnc_stop" false
+    "text-editor" false
 
   write_desktop "System_Monitor.desktop" "System Monitor" \
     "xterm -e 'htop || top'" \
-    "sysmon" true
+    "utilities-system-monitor" true
 
-  write_desktop "Terminal.desktop" "Terminal" \
-    "xfce4-terminal" \
-    "terminal" false
+  # Start/stop servers
+  write_desktop "Start_All_Servers.desktop" "Start All Servers" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/start_servers_xfce.sh\"'" \
+    "media-playback-start" false
+
+  write_desktop "Stop_All_Servers.desktop" "Stop All Servers" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/stop_servers_xfce.sh\"'" \
+    "media-playback-stop" false
+
+  write_desktop "Restart_All_Servers.desktop" "Restart All Servers" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/restart_servers_xfce.sh\"'" \
+    "view-refresh" false
+
+  write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
+    "bash -lc 'cd ${RATHENA_INSTALL_DIR} && make -j\$(nproc) || true'" \
+    "applications-development" true
+
+  # VNC helpers
+  write_desktop "Change_VNC_Password.desktop" "Change VNC Password" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"vncpasswd\"'" \
+    "dialog-password" false
+
+  write_desktop "Start_VNC_Server.desktop" "Start VNC Server" \
+    "systemctl start vncserver@1.service" \
+    "video-display" false
+
+  write_desktop "Stop_VNC_Server.desktop" "Stop VNC Server" \
+    "systemctl stop vncserver@1.service" \
+    "process-stop" false
+
+  # Web tools
+  write_desktop "Open_FluxCP.desktop" "Open FluxCP" \
+    "xdg-open http://localhost/" \
+    "internet-web-browser" false
+
+  write_desktop "Open_phpMyAdmin.desktop" "Open phpMyAdmin" \
+    "xdg-open http://localhost/phpmyadmin" \
+    "applications-internet" false
+
+  # DB backup
+  write_desktop "Backup_rAthena_DB.desktop" "Backup rAthena DB" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"mysqldump -u ${DB_USER} -p\\\"${DB_PASS}\\\" ${DB_RAGNAROK} > ${RATHENA_HOME}/db_backups/ragnarok_\$(date +%F).sql && echo Backup done\"'" \
+    "document-save" false
 
   log "Desktop shortcuts created."
 }
@@ -457,7 +435,7 @@ phase_run_vnc_fixer(){
 }
 
 phase_clean_all(){
-  log "Cleaning previous installs (safe + wipe DBs as requested)..."
+  log "Cleaning previous installs (files + DBs + DB user)..."
 
   systemctl stop vncserver@1.service 2>/dev/null || true
 
@@ -495,10 +473,9 @@ DB user:             ${DB_USER}
 DB password:         ${DB_PASS}
 DBs created:         ${DB_RAGNAROK}, ${DB_LOGS}, ${DB_FLUXCP}
 
- DB root: still uses unix_socket (sudo mariadb), no password changed.
+ DB root: still uses unix_socket (login with: sudo mariadb)
  Cred file: /root/.rathena_db_credentials
 
-Desktop icons:       ${ICON_DIR}
 Desktop shortcuts:   ${RATHENA_HOME}/Desktop
 XFCE autostart:      ${RATHENA_HOME}/.config/autostart/rathena-autostart.desktop
 Start script:        ${RATHENA_HOME}/start_servers_xfce.sh
@@ -515,6 +492,7 @@ main(){
   log "Starting final advanced installer..."
   phase_update_upgrade
   phase_install_packages
+  phase_install_chrome
   phase_create_rathena_user
   phase_clone_repos
   phase_setup_mariadb
@@ -523,7 +501,6 @@ main(){
   phase_compile_rathena
   phase_create_vnc_service
   phase_setup_ufw
-  phase_generate_icons
   phase_create_start_stop_scripts_and_autostart
   phase_create_desktop_shortcuts
   phase_run_vnc_fixer
@@ -533,7 +510,7 @@ main(){
 
 # --- CLI / MENU ---
 
-# Still allow direct args if you want:
+# Direct args still supported
 if [ "${1:-}" = "run" ]; then
   main
   exit 0
@@ -548,7 +525,7 @@ fi
 echo
 echo "================ rAthena Installer ================="
 echo " 1) Run full installer"
-echo " 2) Clean previous install (files + DBs)"
+echo " 2) Clean previous install (files + DBs + DB user)"
 echo " 3) Exit"
 echo "===================================================="
 read -rp "Choose an option [1-3]: " choice
