@@ -154,54 +154,58 @@ phase_generate_fluxcp_config() {
     APPFILE="$WEBROOT/application/config/application.php"
     SRVFILE="$WEBROOT/application/config/server.php"
 
-    # Copy example configs if missing
-    [ ! -f "$APPFILE" ] && cp "$WEBROOT/application/config/application.example.php" "$APPFILE"
-    [ ! -f "$SRVFILE" ] && cp "$WEBROOT/application/config/server.example.php" "$SRVFILE"
+    # Ensure config directory exists
+    mkdir -p "$WEBROOT/application/config"
 
-    ####################################
+    # Create empty PHP config files if missing
+    [ ! -f "$APPFILE" ] && echo "<?php return [];" > "$APPFILE"
+    [ ! -f "$SRVFILE" ] && echo "<?php return [];" > "$SRVFILE"
+
+    ###########################
     # application.php patches
-    ####################################
+    ###########################
     sed -i "s/'BaseURI'[[:space:]]*=>[[:space:]]*'[^']*'/'BaseURI' => '\/'/g" "$APPFILE"
     sed -i "s/'InstallerPassword'[[:space:]]*=>[[:space:]]*'[^']*'/'InstallerPassword' => 'RyomaHostingPH'/g" "$APPFILE"
     sed -i "s/'SiteTitle'[[:space:]]*=>[[:space:]]*'[^']*'/'SiteTitle' => 'Ragnarok Control Panel'/g" "$APPFILE"
     sed -i "s/'DonationCurrency'[[:space:]]*=>[[:space:]]*'[^']*'/'DonationCurrency' => 'PHP'/g" "$APPFILE"
 
-    ####################################
+    ###########################
     # server.php patches
-    ####################################
+    ###########################
     sed -i "s/'ServerName'[[:space:]]*=>[[:space:]]*'[^']*'/'ServerName' => 'RagnaROK'/g" "$SRVFILE"
 
-    #############################
+    ###########################
     # DbConfig block
-    #############################
+    ###########################
     sed -i "/'DbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
-        s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname'   => '127.0.0.1'/
-        s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert'    => 'utf8'/
-        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username'   => '${DB_USER}'/
-        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password'   => '${DB_PASS}'/
-        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database'   => '${DB_RAGNAROK}'/
+        s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/
+        s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/
+        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/
+        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/
+        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/
     }" "$SRVFILE"
 
-    #############################
+    ###########################
     # LogsDbConfig block
-    #############################
+    ###########################
     sed -i "/'LogsDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
-        s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert'    => 'utf8'/
-        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username'   => '${DB_USER}'/
-        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password'   => '${DB_PASS}'/
-        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database'   => '${DB_LOGS}'/
+        s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/
+        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/
+        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/
+        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_LOGS}'/
     }" "$SRVFILE"
 
-    #############################
+    ###########################
     # WebDbConfig block
-    #############################
+    ###########################
     sed -i "/'WebDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
-        s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname'   => '127.0.0.1'/
-        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username'   => '${DB_USER}'/
-        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password'   => '${DB_PASS}'/
-        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database'   => '${DB_RAGNAROK}'/
+        s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/
+        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/
+        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/
+        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/
     }" "$SRVFILE"
 
+    # Fix permissions
     chown -R www-data:www-data "$WEBROOT"
     usermod -a -G www-data rathena
     chmod -R 0774 "$WEBROOT"
