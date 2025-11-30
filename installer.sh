@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Advanced rAthena installer (final) - uses ./athena-start start/stop and XFCE autostart for visible VNC terminals
+# Advanced rAthena installer (final)
+# - Uses ./athena-start start/stop and XFCE autostart for visible VNC terminals
+# - Uses MariaDB unix_socket auth (no root password touch)
 # Run as root
 
 LOGFILE="/var/log/rathena_installer_final.log"
@@ -14,24 +16,31 @@ ICON_DIR="${RATHENA_HOME}/.icons"
 STATE_DIR="/opt/rathena_installer_state"
 DEFAULT_VNC_PASSWORD="Ch4ng3me"
 CHROME_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
-DB_ROOT_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || true)"
+
+# DB settings (root uses unix_socket, no password)
 DB_USER="rathena"
 DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || true)"
 DB_RAGNAROK="ragnarok"
 DB_LOGS="ragnarok_logs"
 DB_FLUXCP="fluxcp"
+
 VNC_FIXER="./vnc_fixer.sh"
 
 mkdir -p "$(dirname "$LOGFILE")" "$STATE_DIR" "$ICON_DIR"
 touch "$LOGFILE" || true
 chmod 600 "$LOGFILE" 2>/dev/null || true
 
-log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
+log(){
+  echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"
+}
 
 [ "$(id -u)" -eq 0 ] || { echo "Run as root"; exit 1; }
 
-cmd_exists(){ command -v "$1" >/dev/null 2>&1 || return 1; }
-apt_install(){ DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends "$@"; }
+cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
+
+apt_install(){
+  DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends "$@"
+}
 
 phase_update_upgrade(){
   log "Updating system..."
@@ -60,6 +69,7 @@ phase_create_rathena_user(){
   else
     log "User ${RATHENA_USER} exists."
   fi
+
   mkdir -p "${RATHENA_HOME}/Desktop" "${RATHENA_HOME}/.config/autostart" "${RATHENA_HOME}/sql_imports"
   chown -R "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}"
 }
@@ -67,9 +77,8 @@ phase_create_rathena_user(){
 phase_clone_repos(){
   log "Cloning rAthena..."
   rm -rf "$RATHENA_INSTALL_DIR"
-  sudo -u "$RATHENA_USER" git clone --depth 1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" || {
-    sudo -u "$RATHENA_USER" git clone "$RATHENA_REPO" "$RATHENA_INSTALL_DIR"
-  }
+  sudo -u "$RATHENA_USER" git clone --depth 1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" \
+    || sudo -u "$RATHENA_USER" git clone "$RATHENA_REPO" "$RATHENA_INSTALL_DIR"
   log "rAthena cloned."
 
   log "Cloning FluxCP into ${WEBROOT}..."
@@ -82,47 +91,55 @@ phase_clone_repos(){
 phase_setup_mariadb(){
   log "Starting MariaDB and creating DBs/users..."
   systemctl enable --now mariadb
-  mysql <<SQL
-ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}';
-DELETE FROM mysql.user WHERE User='';
-DROP DATABASE IF EXISTS test;
-DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
-FLUSH PRIVILEGES;
-CREATE DATABASE IF NOT EXISTS \`${DB_RAGNAROK}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-CREATE DATABASE IF NOT EXISTS \`${DB_LOGS}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-CREATE DATABASE IF NOT EXISTS \`${DB_FLUXCP}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+
+  if ! cmd_exists mariadb; then
+    log "ERROR: mariadb client not found."
+    exit 1
+  fi
+
+  # Use unix_socket root auth, no password
+  mariadb <<SQL
+CREATE DATABASE IF NOT EXISTS ${DB_RAGNAROK}
+  DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS ${DB_LOGS}
+  DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS ${DB_FLUXCP}
+  DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+
 CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${DB_RAGNAROK}\`.* TO '${DB_USER}'@'localhost';
-GRANT ALL PRIVILEGES ON \`${DB_LOGS}\`.* TO '${DB_USER}'@'localhost';
-GRANT ALL PRIVILEGES ON \`${DB_FLUXCP}\`.* TO '${DB_USER}'@'localhost';
+GRANT ALL PRIVILEGES ON ${DB_RAGNAROK}.* TO '${DB_USER}'@'localhost';
+GRANT ALL PRIVILEGES ON ${DB_LOGS}.*     TO '${DB_USER}'@'localhost';
+GRANT ALL PRIVILEGES ON ${DB_FLUXCP}.*   TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 SQL
 
   CRED_FILE="/root/.rathena_db_credentials"
   cat > "$CRED_FILE" <<EOF
-DB_ROOT_PASS='${DB_ROOT_PASS}'
 DB_USER='${DB_USER}'
 DB_PASS='${DB_PASS}'
 DB_RAGNAROK='${DB_RAGNAROK}'
 DB_LOGS='${DB_LOGS}'
 DB_FLUXCP='${DB_FLUXCP}'
+# Root still uses unix_socket (sudo mariadb)
 EOF
   chmod 600 "$CRED_FILE"
-  log "MariaDB secured and DBs/users created. Creds saved to $CRED_FILE"
+  log "MariaDB DBs/users created. Creds saved to $CRED_FILE"
 }
 
 phase_import_sqls(){
   log "Attempting to import any .sql files found..."
   IMPORT_DIRS=("$RATHENA_INSTALL_DIR/sql" "${RATHENA_HOME}/sql_imports")
+
   for d in "${IMPORT_DIRS[@]}"; do
     if [ -d "$d" ]; then
       for f in "$d"/*.sql; do
         [ -e "$f" ] || continue
         log "Importing $f into ${DB_RAGNAROK}..."
-        mysql -u root -p"${DB_ROOT_PASS}" "${DB_RAGNAROK}" < "$f" || log "Import failed for $f"
+        mariadb "${DB_RAGNAROK}" < "$f" || log "Import failed for $f"
       done
     fi
   done
+
   log "SQL import step done."
 }
 
@@ -130,11 +147,11 @@ phase_generate_fluxcp_config(){
   log "Seeding FluxCP database config placeholder..."
   CONF_DIR="$WEBROOT/application/config"
   mkdir -p "$CONF_DIR"
+
   cat > "$CONF_DIR/database.php" <<EOF
-<?php
-return [
+<?php return [
   'default' => [
-    'host' => 'localhost',
+    'host'     => 'localhost',
     'username' => '${DB_USER}',
     'password' => '${DB_PASS}',
     'database' => '${DB_FLUXCP}',
@@ -144,6 +161,7 @@ return [
   ],
 ];
 EOF
+
   chown -R www-data:www-data "$WEBROOT"
   log "FluxCP config placeholder created."
 }
@@ -153,7 +171,8 @@ phase_compile_rathena(){
   if [ -d "$RATHENA_INSTALL_DIR" ]; then
     cd "$RATHENA_INSTALL_DIR"
     if [ -f "Makefile" ] || [ -f "src/Makefile" ]; then
-      sudo -u "$RATHENA_USER" bash -lc "cd '$RATHENA_INSTALL_DIR' && make clean || true && make -j\$(nproc)" || log "Compile had issues."
+      sudo -u "$RATHENA_USER" bash -lc "cd '$RATHENA_INSTALL_DIR' && make clean || true && make -j\$(nproc)" \
+        || log "Compile had issues."
     else
       log "No Makefile; skipping compile."
     fi
@@ -179,6 +198,7 @@ ExecStop=/usr/bin/su - %i -c "/usr/bin/vncserver -kill :%i"
 [Install]
 WantedBy=multi-user.target
 EOF
+
   systemctl daemon-reload
   systemctl enable --now vncserver@1.service || true
   log "VNC template created and vncserver@1 enabled (attempted)."
@@ -219,7 +239,7 @@ SVG
       cp "$svg" "${ICON_DIR}/${name}.svg"
     fi
     rm -f "$svg"
-    chown "${RATHENA_USER}:${RATHENA_USER}" "$png" || true
+    chown "${RATHENA_USER}:${RATHENA_USER}" "$png" 2>/dev/null || true
     log "Icon created: $png"
   }
 
@@ -268,21 +288,17 @@ else
   fi
 fi
 
-# Open terminals tailing logs. Adjust filenames as necessary.
 LOG_DIR="${RATHENA_DIR}/log"
 mkdir -p "$LOG_DIR"
 
-# helper to open terminal and tail the right file (fallbacks included)
 open_tail(){
   title="$1"; pattern="$2"
-  # choose file if exists, otherwise fallback to any file matching pattern
   file=""
   if [ -f "${LOG_DIR}/${pattern}.log" ]; then
     file="${LOG_DIR}/${pattern}.log"
   else
-    # pick first matching pattern
-    filefound=( "${LOG_DIR}"/*"${pattern}"*  )
-    if [ -e "${filefound[0]}" ]; then
+    filefound=( "${LOG_DIR}"/*"${pattern}"* )
+    if [ -e "${filefound[0]:-}" ]; then
       file="${filefound[0]}"
     fi
   fi
@@ -290,7 +306,6 @@ open_tail(){
   if [ -n "$file" ]; then
     xfce4-terminal --title="$title" -e "bash -lc 'tail -n +1 -F \"$file\"; exec bash'" &
   else
-    # open an interactive terminal if no log found
     xfce4-terminal --title="$title" -e "bash -lc 'cd \"$RATHENA_DIR\"; echo No log file found for $pattern; exec bash'" &
   fi
 }
@@ -298,6 +313,7 @@ open_tail(){
 open_tail "login-server" "login"
 open_tail "char-server" "char"
 open_tail "map-server" "map"
+
 sleep 1
 exit 0
 SH
@@ -334,7 +350,6 @@ SH
   chmod +x "$RESTART_SCRIPT"
   chown "${RATHENA_USER}:${RATHENA_USER}" "$RESTART_SCRIPT"
 
-  # XFCE autostart .desktop — runs only for rathena user at XFCE session start (VNC)
   AUTOSTART_DIR="${RATHENA_HOME}/.config/autostart"
   mkdir -p "$AUTOSTART_DIR"
   cat > "${AUTOSTART_DIR}/rathena-autostart.desktop" <<EOF
@@ -346,6 +361,7 @@ Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
   chown -R "${RATHENA_USER}:${RATHENA_USER}" "${AUTOSTART_DIR}"
+
   log "Start/Stop scripts and XFCE autostart created."
 }
 
@@ -354,6 +370,10 @@ phase_create_desktop_shortcuts(){
   DESKTOP_DIR="${RATHENA_HOME}/Desktop"
   mkdir -p "$DESKTOP_DIR"
   chown -R "${RATHENA_USER}:${RATHENA_USER}" "$DESKTOP_DIR"
+
+  # db backup dir
+  mkdir -p "${RATHENA_HOME}/db_backups"
+  chown -R "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/db_backups"
 
   write_desktop(){
     file="$1"; name="$2"; cmd="$3"; icon="$4"; terminal="${5:-false}"
@@ -371,19 +391,58 @@ EOF
     log "Created ${DESKTOP_DIR}/${file}"
   }
 
-  write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" "bash -lc 'cd ${RATHENA_INSTALL_DIR} && make -j\$(nproc) || true'" "recompile" true
-  write_desktop "Start_All.desktop" "Start All Servers" "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/start_servers_xfce.sh\"'" "start_all" false
-  write_desktop "Stop_All.desktop" "Stop All Servers" "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/stop_servers_xfce.sh\"'" "stop_all" false
-  write_desktop "Restart_All.desktop" "Restart All Servers" "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/restart_servers_xfce.sh\"'" "restart_all" false
-  write_desktop "Edit_Configs.desktop" "Edit rAthena Configs" "bash -lc 'xdg-open ${RATHENA_INSTALL_DIR}/conf || xterm -e \"ls -la ${RATHENA_INSTALL_DIR}/conf\"'" "edit_configs" false
-  write_desktop "Open_FluxCP.desktop" "Open FluxCP" "xdg-open http://localhost/" "fluxcp" false
-  write_desktop "Open_phpMyAdmin.desktop" "Open phpMyAdmin" "xdg-open http://localhost/phpmyadmin" "phpmyadmin" false
-  write_desktop "Backup_DB.desktop" "Backup rAthena DB" "bash -lc 'su - ${RATHENA_USER} -c \"mysqldump -u ${DB_USER} -p\\\"${DB_PASS}\\\" ${DB_RAGNAROK} > ${RATHENA_HOME}/db_backups/ragnarok_$(date +%F).sql && echo Backup done\"'" "backup_db" false
-  write_desktop "Change_VNC_Password.desktop" "Change VNC Password" "bash -lc 'su - ${RATHENA_USER} -c \"vncpasswd\"'" "change_vnc" false
-  write_desktop "VNC_Start.desktop" "Start VNC Server" "systemctl start vncserver@1.service" "vnc_start" false
-  write_desktop "VNC_Stop.desktop" "Stop VNC Server" "systemctl stop vncserver@1.service" "vnc_stop" false
-  write_desktop "System_Monitor.desktop" "System Monitor" "xterm -e 'htop || top'" "sysmon" true
-  write_desktop "Terminal.desktop" "Terminal" "xfce4-terminal" "terminal" false
+  write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
+    "bash -lc 'cd ${RATHENA_INSTALL_DIR} && make -j\$(nproc) || true'" \
+    "recompile" true
+
+  write_desktop "Start_All.desktop" "Start All Servers" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/start_servers_xfce.sh\"'" \
+    "start_all" false
+
+  write_desktop "Stop_All.desktop" "Stop All Servers" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/stop_servers_xfce.sh\"'" \
+    "stop_all" false
+
+  write_desktop "Restart_All.desktop" "Restart All Servers" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"${RATHENA_HOME}/restart_servers_xfce.sh\"'" \
+    "restart_all" false
+
+  write_desktop "Edit_Configs.desktop" "Edit rAthena Configs" \
+    "bash -lc 'xdg-open ${RATHENA_INSTALL_DIR}/conf || xterm -e \"ls -la ${RATHENA_INSTALL_DIR}/conf\"'" \
+    "edit_configs" false
+
+  write_desktop "Open_FluxCP.desktop" "Open FluxCP" \
+    "xdg-open http://localhost/" \
+    "fluxcp" false
+
+  write_desktop "Open_phpMyAdmin.desktop" "Open phpMyAdmin" \
+    "xdg-open http://localhost/phpmyadmin" \
+    "phpmyadmin" false
+
+  write_desktop "Backup_DB.desktop" "Backup rAthena DB" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"mysqldump -u ${DB_USER} -p\\\"${DB_PASS}\\\" ${DB_RAGNAROK} > ${RATHENA_HOME}/db_backups/ragnarok_\$(date +%F).sql && echo Backup done\"'" \
+    "backup_db" false
+
+  write_desktop "Change_VNC_Password.desktop" "Change VNC Password" \
+    "bash -lc 'su - ${RATHENA_USER} -c \"vncpasswd\"'" \
+    "change_vnc" false
+
+  write_desktop "VNC_Start.desktop" "Start VNC Server" \
+    "systemctl start vncserver@1.service" \
+    "vnc_start" false
+
+  write_desktop "VNC_Stop.desktop" "Stop VNC Server" \
+    "systemctl stop vncserver@1.service" \
+    "vnc_stop" false
+
+  write_desktop "System_Monitor.desktop" "System Monitor" \
+    "xterm -e 'htop || top'" \
+    "sysmon" true
+
+  write_desktop "Terminal.desktop" "Terminal" \
+    "xfce4-terminal" \
+    "terminal" false
+
   log "Desktop shortcuts created."
 }
 
@@ -398,37 +457,57 @@ phase_run_vnc_fixer(){
 }
 
 phase_clean_all(){
-  log "Cleaning previous installs (safe)..."
+  log "Cleaning previous installs (safe + wipe DBs as requested)..."
+
   systemctl stop vncserver@1.service 2>/dev/null || true
+
+  # Remove files
   rm -rf "$RATHENA_INSTALL_DIR"
   rm -rf "${WEBROOT:?}"/*
+
+  # Drop DBs and user
+  if cmd_exists mariadb; then
+    systemctl start mariadb 2>/dev/null || true
+    log "Dropping MariaDB databases and user..."
+    mariadb <<SQL || log "Warning: DB drop failed (check manually)"
+DROP DATABASE IF EXISTS ${DB_RAGNAROK};
+DROP DATABASE IF EXISTS ${DB_LOGS};
+DROP DATABASE IF EXISTS ${DB_FLUXCP};
+DROP USER IF EXISTS '${DB_USER}'@'localhost';
+FLUSH PRIVILEGES;
+SQL
+  else
+    log "mariadb client not found; skipping DB drop."
+  fi
+
+  rm -f /root/.rathena_db_credentials
+
   log "Clean complete."
 }
 
 print_summary(){
   cat <<EOF
-
 === INSTALLATION SUMMARY ===
-
 rAthena install dir: ${RATHENA_INSTALL_DIR}
-FluxCP webroot: ${WEBROOT}
-DB user: ${DB_USER}
-DB password: ${DB_PASS}
-DBs created: ${DB_RAGNAROK}, ${DB_LOGS}, ${DB_FLUXCP}
-Root DB password saved to: /root/.rathena_db_credentials
+FluxCP webroot:      ${WEBROOT}
 
-Desktop icons: ${ICON_DIR}
-Desktop shortcuts: ${RATHENA_HOME}/Desktop
-XFCE autostart script: ${RATHENA_HOME}/.config/autostart/rathena-autostart.desktop
-Visible servers start script: ${RATHENA_HOME}/start_servers_xfce.sh
-Stop script: ${RATHENA_HOME}/stop_servers_xfce.sh
+DB user:             ${DB_USER}
+DB password:         ${DB_PASS}
+DBs created:         ${DB_RAGNAROK}, ${DB_LOGS}, ${DB_FLUXCP}
+
+ DB root: still uses unix_socket (sudo mariadb), no password changed.
+ Cred file: /root/.rathena_db_credentials
+
+Desktop icons:       ${ICON_DIR}
+Desktop shortcuts:   ${RATHENA_HOME}/Desktop
+XFCE autostart:      ${RATHENA_HOME}/.config/autostart/rathena-autostart.desktop
+Start script:        ${RATHENA_HOME}/start_servers_xfce.sh
+Stop script:         ${RATHENA_HOME}/stop_servers_xfce.sh
 
 Notes:
- - Servers will start ONLY when rathena user logs into XFCE (VNC) — as requested (Option A).
- - The start script uses ./athena-start start and then opens terminals that tail log files.
- - If log files are not present, the terminals will open in the repo folder and show a message.
- - Do NOT enable any systemd rathena services that start the same servers, or you'll get duplicate processes.
-
+- Servers start ONLY when user "${RATHENA_USER}" logs into XFCE (VNC).
+- Start script uses ./athena-start start then opens log terminals.
+- Do NOT create duplicate systemd services for the same rAthena servers.
 EOF
 }
 
@@ -452,27 +531,31 @@ main(){
   log "Installer finished."
 }
 
-# CLI
-if [ "${1:-}" = "clean" ]; then
-  phase_clean_all; exit 0
-fi
+# --- CLI / MENU ---
+
+# Still allow direct args if you want:
 if [ "${1:-}" = "run" ]; then
-  main; exit 0
+  main
+  exit 0
 fi
 
-cat <<EOF
-Usage:
-  run   - perform the full advanced install now
-  clean - remove previous installation artifacts (safe)
-Example:
-  sudo ./installer_final_with_xfce_autostart.sh run
+if [ "${1:-}" = "clean" ]; then
+  phase_clean_all
+  exit 0
+fi
 
-EOF
+# Interactive menu (default)
+echo
+echo "================ rAthena Installer ================="
+echo " 1) Run full installer"
+echo " 2) Clean previous install (files + DBs)"
+echo " 3) Exit"
+echo "===================================================="
+read -rp "Choose an option [1-3]: " choice
 
-read -rp "Type 'run' to execute the full installer or 'clean' to remove old installs: " choice
 case "$choice" in
-  run) main ;;
-  clean) phase_clean_all ;;
+  1) main ;;
+  2) phase_clean_all ;;
   *) echo "Exiting." ;;
 esac
 
