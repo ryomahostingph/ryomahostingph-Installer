@@ -21,17 +21,23 @@ DB_FLUXCP="fluxcp"
 CRED_FILE="/root/.rathena_db_credentials"
 
 # ================== SETUP LOG & ENV ==================
+export DEBIAN_FRONTEND=noninteractive
+
 mkdir -p "$(dirname "$LOGFILE")" "$STATE_DIR"
 touch "$LOGFILE" || true
 chmod 600 "$LOGFILE" 2>/dev/null || true
+
 log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
+
 [ "$(id -u)" -eq 0 ] || { echo "Run as root"; exit 1; }
+
 cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
-apt_install(){ DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends "$@"; }
+apt_install(){ apt install -y --no-install-recommends "$@"; }
 
 # ================== LOAD / GENERATE DB CREDENTIALS ==================
 if [ -f "$CRED_FILE" ]; then
     log "Loading existing DB credentials from $CRED_FILE"
+    # shellcheck source=/dev/null
     source "$CRED_FILE"
 else
     log "No existing DB credentials found. Generating new password..."
@@ -42,7 +48,8 @@ fi
 
 phase_update_upgrade(){
     log "Updating system..."
-    apt update -y && apt upgrade -y
+    apt update
+    apt upgrade -y
     log "System updated."
 }
 
@@ -83,10 +90,17 @@ phase_create_rathena_user(){
 phase_clone_repos(){
     log "Cloning rAthena..."
     rm -rf "$RATHENA_INSTALL_DIR"
-    sudo -u "$RATHENA_USER" git clone --depth 1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" || log "Failed to clone rAthena"
-    
+
+    if cmd_exists sudo; then
+        sudo -u "$RATHENA_USER" git clone --depth 1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" || log "Failed to clone rAthena"
+    else
+        su - "$RATHENA_USER" -s /bin/bash -c "git clone --depth 1 '$RATHENA_REPO' '$RATHENA_INSTALL_DIR'" || log "Failed to clone rAthena"
+    fi
+
     log "Cloning FluxCP into ${WEBROOT}..."
-    rm -rf "${WEBROOT:?}/"* "${WEBROOT:?}/".* 2>/dev/null || true
+    if [ -d "$WEBROOT" ]; then
+        find "$WEBROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+    fi
     git clone --depth 1 https://github.com/rathena/FluxCP.git "$WEBROOT" || log "Failed to clone FluxCP"
     chown -R www-data:www-data "$WEBROOT"
 }
@@ -128,8 +142,6 @@ phase_compile_rathena() {
 
     log "rAthena compiled successfully."
 }
-
-
 
 phase_import_sqls(){
     log "Importing SQL files..."
@@ -212,7 +224,6 @@ phase_generate_fluxcp_config() {
 
     log "FluxCP application.php and server.php patched."
 }
-
 
 phase_generate_rathena_config(){
     log "Generating rAthena import config files..."
@@ -355,12 +366,12 @@ phase_clean_all(){
 
     # Remove FluxCP files
     if [ -d "$WEBROOT" ]; then
-        rm -rf "${WEBROOT:?}/"* "${WEBROOT:?}/".* 2>/dev/null || true
+        find "$WEBROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
     fi
 
     # Remove Desktop details and shortcuts
     rm -f "$RATHENA_HOME/Desktop/ServerDetails.txt"
-    rm -f "$RATHENA_HOME/Desktop/"*.desktop
+    rm -f "$RATHENA_HOME/Desktop/"*.desktop 2>/dev/null || true
 
     # Remove DB backups and import folders
     rm -rf "$RATHENA_HOME/db_backups" "$RATHENA_HOME/sql_imports"
@@ -385,7 +396,6 @@ SQL
 
     log "Clean complete. All rAthena files, databases, and user credentials removed."
 }
-
 
 phase_regenerate_db_password(){
     log "Regenerating DB password..."
@@ -423,27 +433,6 @@ main(){
     log "Installer finished. ServerDetails.txt on Desktop and shortcuts created."
 }
 
-# ================== CLI MENU ==================
-echo "================ rAthena Installer ================="
-echo " 1) Run full installer"
-echo " 2) Clean previous install (files + DBs + DB user)"
-echo " 3) Regenerate rAthena DB password"
-echo " 4) Recompile rAthena server"
-echo " 5) Generate rAthena config (conf/import)"
-echo " 6) Generate FluxCP config (application/config)"
-echo " 7) Exit"
-echo "===================================================="
-read -rp "Choose an option [1-7]: " choice
-
-case "$choice" in
-  1) main ;;
-  2) phase_clean_all ;;
-  3) phase_regenerate_db_password ;;
-  4) phase_compile_rathena ;;
-  5) phase_generate_rathena_config ;;
-  6) phase_generate_fluxcp_config ;;
-  7) echo "Exiting." ;;
-  *) echo "Invalid choice. Exiting." ;;
-esac
-
+# ================== NON-INTERACTIVE ENTRYPOINT ==================
+main
 exit 0
