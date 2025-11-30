@@ -84,7 +84,7 @@ phase_clone_repos(){
     rm -rf "$RATHENA_INSTALL_DIR"
     sudo -u "$RATHENA_USER" git clone --depth 1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" || log "Failed to clone rAthena"
     log "Cloning FluxCP into ${WEBROOT}..."
-    rm -rf "${WEBROOT:?}/"{*,.*} 2>/dev/null || true
+    rm -rf "${WEBROOT:?}/"* "${WEBROOT:?}/".* 2>/dev/null || true
     git clone --depth 1 https://github.com/rathena/FluxCP.git "$WEBROOT" || log "Failed to clone FluxCP"
     chown -R www-data:www-data "$WEBROOT"
 }
@@ -114,14 +114,37 @@ EOF
 }
 
 phase_compile_rathena(){
-    log "Compiling rAthena (as ${RATHENA_USER})..."
-    if [ ! -d "$RATHENA_INSTALL_DIR" ]; then
+    log "Preparing to compile rAthena (as ${RATHENA_USER})..."
+
+    # Ensure proper ownership and permissions for the rAthena directory and scripts
+    log "Fixing permissions for rAthena directory..."
+    if [ -d "$RATHENA_INSTALL_DIR" ]; then
+        chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR"
+        chmod -R 755 "$RATHENA_INSTALL_DIR"  # Set read and execute permissions for all files in the directory
+        find "$RATHENA_INSTALL_DIR" -type f -name "*.sh" -exec chmod +x {} \;  # Ensure all *.sh scripts are executable
+    else
         log "rAthena directory not found: $RATHENA_INSTALL_DIR"
         return 0
     fi
-    sudo -u "$RATHENA_USER" bash -lc "cd '${RATHENA_INSTALL_DIR}' && ./configure --enable-utf8 && make clean && make -j\$(nproc)" || log "Compilation failed (check logs)"
+
+    # Ensure the server startup scripts are executable
+    if [ -d "${RATHENA_INSTALL_DIR}/src/map" ]; then
+        chmod +x "${RATHENA_INSTALL_DIR}/src/map/map-server.sh" || log "Failed to set executable permission for map-server.sh"
+    fi
+    if [ -d "${RATHENA_INSTALL_DIR}/src/char" ]; then
+        chmod +x "${RATHENA_INSTALL_DIR}/src/char/char-server.sh" || log "Failed to set executable permission for char-server.sh"
+    fi
+    if [ -d "${RATHENA_INSTALL_DIR}/src/login" ]; then
+        chmod +x "${RATHENA_INSTALL_DIR}/src/login/login-server.sh" || log "Failed to set executable permission for login-server.sh"
+    fi
+
+    # Now proceed with the compilation
+    log "Compiling rAthena (as ${RATHENA_USER})..."
+    sudo -u "$RATHENA_USER" bash -c "cd '$RATHENA_INSTALL_DIR' && ./configure --enable-utf8 && make clean && make -j\$(nproc)" || log "Compilation failed (check logs)"
+
     log "Compile step completed (or failed with non-fatal error logged)."
 }
+
 
 phase_import_sqls(){
     log "Importing SQL files..."
