@@ -34,6 +34,26 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
 apt_install(){ apt install -y --no-install-recommends "$@"; }
 
+# ================== SIMPLE SPINNER ==================
+spinner() {
+    local pid="$1"
+    local label="$2"
+    local spin='-\|/'
+    local i=0
+
+    # Only animate on TTY; if not, just return and let wait() handle it
+    if [ ! -t 1 ]; then
+        return 0
+    fi
+
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r[%c] %s" "${spin:i++%4:1}" "$label"
+        sleep 0.2
+    done
+
+    printf "\r[✓] %s\n" "$label"
+}
+
 # ================== LOAD / GENERATE DB CREDENTIALS ==================
 if [ -f "$CRED_FILE" ]; then
     log "Loading existing DB credentials from $CRED_FILE"
@@ -49,7 +69,15 @@ run_phase() {
     local label="$1"; shift
     log "=== Starting: ${label} ==="
 
-    "$@"
+    # Run the phase in the background
+    "$@" &
+    local phase_pid=$!
+
+    # Show spinner while it's running
+    spinner "$phase_pid" "${label} in progress..."
+
+    # Wait for the phase to finish and get exit code
+    wait "$phase_pid"
     local rc=$?
 
     if [ $rc -ne 0 ]; then
