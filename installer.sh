@@ -113,17 +113,65 @@ EOF
     log "MariaDB setup complete and credentials saved to $CRED_FILE"
 }
 
+phase_compile_rathena(){
+    log "Compiling rAthena (as ${RATHENA_USER})..."
+    if [ ! -d "$RATHENA_INSTALL_DIR" ]; then
+        log "rAthena directory not found: $RATHENA_INSTALL_DIR"
+        return 0
+    fi
+    sudo -u "$RATHENA_USER" bash -lc "cd '${RATHENA_INSTALL_DIR}' && ./configure --enable-utf8 && make clean && make -j\$(nproc)" || log "Compilation failed (check logs)"
+    log "Compile step completed (or failed with non-fatal error logged)."
+}
+
 phase_import_sqls(){
-    log "Importing SQLs (if any) into ${DB_RAGNAROK}..."
-    for dir in "$RATHENA_INSTALL_DIR/sql" "${RATHENA_HOME}/sql_imports"; do
+    log "Importing SQL files..."
+
+    SQL_DIR1="${RATHENA_INSTALL_DIR}/sql"
+    SQL_DIR2="${RATHENA_HOME}/sql_imports"
+
+    # ---------- IMPORT main.sql FIRST ----------
+    for dir in "$SQL_DIR1" "$SQL_DIR2"; do
+        if [ -f "$dir/main.sql" ]; then
+            log "Importing main.sql into ${DB_RAGNAROK}..."
+            mariadb "${DB_RAGNAROK}" < "$dir/main.sql" \
+                && log "Imported main.sql" \
+                || log "Failed to import main.sql"
+        fi
+    done
+
+    # ---------- IMPORT logs.sql FIRST TO LOG DB ----------
+    for dir in "$SQL_DIR1" "$SQL_DIR2"; do
+        if [ -f "$dir/logs.sql" ]; then
+            log "Importing logs.sql into ${DB_LOGS}..."
+            mariadb "${DB_LOGS}" < "$dir/logs.sql" \
+                && log "Imported logs.sql" \
+                || log "Failed to import logs.sql"
+        fi
+    done
+
+    # ---------- IMPORT ALL OTHER SQLS ----------
+    for dir in "$SQL_DIR1" "$SQL_DIR2"; do
         [ -d "$dir" ] || continue
+
         for f in "$dir"/*.sql; do
             [ -e "$f" ] || continue
-            mariadb "${DB_RAGNAROK}" < "$f" || log "Failed import $f"
-            log "Imported $f"
+
+            base="$(basename "$f")"
+
+            # skip because already imported
+            [[ "$base" == "main.sql" ]] && continue
+            [[ "$base" == "logs.sql" ]] && continue
+
+            log "Importing $base into ${DB_RAGNAROK}..."
+            mariadb "${DB_RAGNAROK}" < "$f" \
+                && log "Imported $base" \
+                || log "Failed import $base"
         done
     done
+
+    log "SQL import completed."
 }
+
 
 phase_generate_fluxcp_config(){
     log "Generating FluxCP database config..."
@@ -168,16 +216,6 @@ phase_setup_phpmyadmin(){
     a2enconf phpmyadmin || true
     systemctl reload apache2 || systemctl restart apache2
     log "phpMyAdmin available at /phpmyadmin"
-}
-
-phase_compile_rathena(){
-    log "Compiling rAthena (as ${RATHENA_USER})..."
-    if [ ! -d "$RATHENA_INSTALL_DIR" ]; then
-        log "rAthena directory not found: $RATHENA_INSTALL_DIR"
-        return 0
-    fi
-    sudo -u "$RATHENA_USER" bash -lc "cd '${RATHENA_INSTALL_DIR}' && ./configure --enable-utf8 --packetver=20240403 && make clean && make -j\$(nproc)" || log "Compilation failed (check logs)"
-    log "Compile step completed (or failed with non-fatal error logged)."
 }
 
 phase_create_serverdetails(){
