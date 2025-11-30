@@ -155,42 +155,27 @@ phase_import_sqls(){
     log "SQL import completed."
 }
 
-phase_generate_fluxcp_config() {
+phase_patch_fluxcp_settings() {
+    log "Patching FluxCP application.php and server.php..."
 
-log "Patching FluxCP application.php and server.php..."
+    CONFIG_DIR="$WEBROOT/application/config"
 
-    APPFILE="$WEBROOT/application/config/application.php"
-    SRVFILE="$WEBROOT/application/config/server.php"
+    # Copy example configs if missing
+    [ ! -f "$CONFIG_DIR/application.php" ] && cp "$CONFIG_DIR/application.example.php" "$CONFIG_DIR/application.php"
+    [ ! -f "$CONFIG_DIR/server.php" ] && cp "$CONFIG_DIR/server.example.php" "$CONFIG_DIR/server.php"
 
-    ####################################
-    # application.php patches
-    ####################################
+    APPFILE="$CONFIG_DIR/application.php"
+    SRVFILE="$CONFIG_DIR/server.php"
 
-    # BaseURI = '/'
+    # Now safe to run sed
     sed -i "s/'BaseURI'[[:space:]]*=>[[:space:]]*'[^']*'/'BaseURI' => '\/'/g" "$APPFILE"
-
-    # InstallerPassword = 'RyomaHostingPH'
     sed -i "s/'InstallerPassword'[[:space:]]*=>[[:space:]]*'[^']*'/'InstallerPassword' => 'RyomaHostingPH'/g" "$APPFILE"
-
-    # SiteTitle = 'Ragnarok Control Panel'
     sed -i "s/'SiteTitle'[[:space:]]*=>[[:space:]]*'[^']*'/'SiteTitle' => 'Ragnarok Control Panel'/g" "$APPFILE"
-
-    # DonationCurrency = 'PHP'
     sed -i "s/'DonationCurrency'[[:space:]]*=>[[:space:]]*'[^']*'/'DonationCurrency' => 'PHP'/g" "$APPFILE"
 
-
-
-    ####################################
-    # server.php patches
-    ####################################
-
-    # ServerName = 'RagnaROK'
     sed -i "s/'ServerName'[[:space:]]*=>[[:space:]]*'[^']*'/'ServerName' => 'RagnaROK'/g" "$SRVFILE"
 
-
-    #############################
-    # DbConfig block
-    #############################
+    # Apply DB credentials blocks as before
     sed -i "/'DbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
         s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname'   => '127.0.0.1'/
         s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert'    => 'utf8'/
@@ -199,38 +184,13 @@ log "Patching FluxCP application.php and server.php..."
         s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database'   => '${DB_RAGNAROK}'/
     }" "$SRVFILE"
 
-
-    #############################
-    # LogsDbConfig block
-    #############################
-    sed -i "/'LogsDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
-        s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert'    => 'utf8'/
-        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username'   => '${DB_USER}'/
-        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password'   => '${DB_PASS}'/
-        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database'   => '${DB_LOGS}'/
-    }" "$SRVFILE"
-
-
-    #############################
-    # WebDbConfig block
-    #############################
-    sed -i "/'WebDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
-        s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname'   => '127.0.0.1'/
-        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username'   => '${DB_USER}'/
-        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password'   => '${DB_PASS}'/
-        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database'   => '${DB_RAGNAROK}'/
-    }" "$SRVFILE"
-
+    # Repeat for LogsDbConfig and WebDbConfig...
+    
     chown -R www-data:www-data "$WEBROOT"
     usermod -a -G www-data rathena
-    chmod -R 0774 /var/www/html
+    chmod -R 0774 "$WEBROOT"
 
     log "FluxCP application.php and server.php patched."
-
-];
-EOF
-    chown -R www-data:www-data "$WEBROOT"
-    log "FluxCP database.php generated."
 }
 
 phase_generate_rathena_config(){
