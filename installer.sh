@@ -41,18 +41,23 @@ spinner() {
     local spin='-\|/'
     local i=0
 
-    # Only animate on TTY; if not, just return and let wait() handle it
-    if [ ! -t 1 ]; then
-        return 0
-    fi
+    # REMOVE THIS:
+    # if [ ! -t 1 ]; then
+    #     return 0
+    # fi
 
     while kill -0 "$pid" 2>/dev/null; do
-        printf "\r[%c] %s" "${spin:i++%4:1}" "$label"
+        if [ -t 1 ]; then
+            printf "\r[%c] %s" "${spin:i++%4:1}" "$label"
+        fi
         sleep 0.2
     done
 
-    printf "\r[✓] %s\n" "$label"
+    if [ -t 1 ]; then
+        printf "\r[✓] %s\n" "$label"
+    fi
 }
+
 
 # ================== LOAD / GENERATE DB CREDENTIALS ==================
 if [ -f "$CRED_FILE" ]; then
