@@ -535,11 +535,11 @@ phase_validate_rathena_setup(){
 }
 
 phase_generate_fluxcp_config(){
-    log "Patching FluxCP application.php and servers.php..."
+    log "Patching FluxCP application.php and servers.php in /config ..."
 
-    mkdir -p "$WEBROOT/application/config"
-    APPFILE="$WEBROOT/application/config/application.php"
-    SRVFILE="$WEBROOT/application/config/servers.php"   # ✅ corrected
+    mkdir -p "$WEBROOT/config"
+    APPFILE="$WEBROOT/config/application.php"
+    SRVFILE="$WEBROOT/config/servers.php"
 
     # If real config doesn't exist, copy from .dist if available
     [ ! -f "$APPFILE" ] && [ -f "${APPFILE}.dist" ] && cp "${APPFILE}.dist" "$APPFILE"
@@ -588,8 +588,9 @@ phase_generate_fluxcp_config(){
     usermod -a -G www-data "$RATHENA_USER" 2>/dev/null || true
     chmod -R 0774 "$WEBROOT"
 
-    log "FluxCP application.php and servers.php patched."
+    log "FluxCP config patched successfully in $WEBROOT/config"
 }
+
 
 
 
