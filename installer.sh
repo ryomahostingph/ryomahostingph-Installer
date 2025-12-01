@@ -177,49 +177,107 @@ phase_create_rathena_user(){
              "${RATHENA_HOME}/sql_imports" "${RATHENA_HOME}/db_backups"
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_HOME"
 
-    # ---- Server control scripts (CMake aware) ----
+    # ---- Ensure VNC xstartup launches XFCE ----
+    mkdir -p "${RATHENA_HOME}/.vnc"
+    cat > "${RATHENA_HOME}/.vnc/xstartup" <<'EOF'
+#!/bin/sh
+xrdb $HOME/.Xresources
+startxfce4 &
+EOF
+    chmod +x "${RATHENA_HOME}/.vnc/xstartup"
+    chown -R "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/.vnc"
+
+    # ---- Server control scripts (MULTI-WINDOW XFCE, CMake aware) ----
     cat > "${RATHENA_HOME}/start_servers_xfce.sh" <<'BASH'
 #!/usr/bin/env bash
 set -e
+
 RATHENA_HOME="/home/rathena"
 BASE="$RATHENA_HOME/Desktop/rathena"
 BIN="$BASE"
 [ -x "$BASE/build/login-server" ] && BIN="$BASE/build"
+
 cd "$BIN"
-nohup ./login-server > /dev/null 2>&1 &
-nohup ./char-server  > /dev/null 2>&1 &
-nohup ./map-server   > /dev/null 2>&1 &
+
+# Prefer xfce4-terminal; fallback to xterm
+TERM_BIN="xfce4-terminal"
+command -v xfce4-terminal >/dev/null 2>&1 || TERM_BIN="xterm"
+
+open_win() {
+  local title="$1"
+  local cmd="$2"
+
+  if [ "$TERM_BIN" = "xfce4-terminal" ]; then
+    # --hold keeps the window open so it stays visible in VNC
+    nohup xfce4-terminal --title="$title" --hold \
+      --command "bash -lc '$cmd'" >/dev/null 2>&1 &
+  else
+    nohup xterm -T "$title" -e "bash -lc '$cmd; echo; echo Press Enter to close...; read'" \
+      >/dev/null 2>&1 &
+  fi
+}
+
+# Avoid duplicates if already running
+pgrep -f login-server >/dev/null 2>&1 || open_win "rAthena Login Server" "./login-server"
+pgrep -f char-server  >/dev/null 2>&1 || open_win "rAthena Char Server"  "./char-server"
+pgrep -f map-server   >/dev/null 2>&1 || open_win "rAthena Map Server"   "./map-server"
+
+# 4th window: show apache/FluxCP log in real-time (your "web server window")
+open_win "FluxCP / Web Server Log" "sudo journalctl -fu apache2"
+
 BASH
     chmod +x "${RATHENA_HOME}/start_servers_xfce.sh"
     chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/start_servers_xfce.sh"
+
 
     cat > "${RATHENA_HOME}/stop_servers_xfce.sh" <<'BASH'
 #!/usr/bin/env bash
 pkill -f login-server || true
 pkill -f char-server || true
 pkill -f map-server || true
+
+# close the apache log tail window
+pkill -f "journalctl -fu apache2" || true
 BASH
     chmod +x "${RATHENA_HOME}/stop_servers_xfce.sh"
     chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/stop_servers_xfce.sh"
 
+
     cat > "${RATHENA_HOME}/restart_servers_xfce.sh" <<'BASH'
 #!/usr/bin/env bash
 set -e
-"${HOME}/stop_servers_xfce.sh" || true
+/home/rathena/stop_servers_xfce.sh || true
 sleep 1
-"${HOME}/start_servers_xfce.sh" || true
+/home/rathena/start_servers_xfce.sh || true
 BASH
-    sed -i "s|\${HOME}|${RATHENA_HOME}|g" "${RATHENA_HOME}/restart_servers_xfce.sh"
     chmod +x "${RATHENA_HOME}/restart_servers_xfce.sh"
     chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/restart_servers_xfce.sh"
+
+
+    # ---- Autostart rAthena windows whenever XFCE/VNC session starts ----
+    local AUTOSTART_DIR="${RATHENA_HOME}/.config/autostart"
+    mkdir -p "$AUTOSTART_DIR"
+
+    cat > "${AUTOSTART_DIR}/rathena-servers.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=rAthena Servers Autostart
+Exec=bash -lc "${RATHENA_HOME}/start_servers_xfce.sh"
+X-GNOME-Autostart-enabled=true
+NoDisplay=false
+EOF
+
+    chown -R "${RATHENA_USER}:${RATHENA_USER}" "${AUTOSTART_DIR}"
+
 
     # Enable VNC template if present
     if systemctl list-unit-files 2>/dev/null | grep -q '^vncserver@'; then
         systemctl enable --now vncserver@1.service 2>/dev/null || true
     fi
 
-    log "User ${RATHENA_USER} prepared."
+    log "User ${RATHENA_USER} prepared with multi-window autostart."
 }
+
 
 phase_configure_phpmyadmin(){
     log "Configuring phpMyAdmin..."
