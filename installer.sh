@@ -223,11 +223,13 @@ BASH
 
 phase_configure_phpmyadmin(){
     log "Configuring phpMyAdmin..."
+
     # Enable PHP module for whichever version exists
     for mod in /etc/apache2/mods-available/php*.load; do
         [ -f "$mod" ] || continue
         a2enmod "$(basename "$mod" .load)" >>"$LOGFILE" 2>&1 || true
     done
+
     systemctl enable --now apache2 >>"$LOGFILE" 2>&1 || return 1
 
     if [ ! -d /usr/share/phpmyadmin ]; then
@@ -235,22 +237,41 @@ phase_configure_phpmyadmin(){
         return 0
     fi
 
+    # ---- Write Apache alias/config for phpMyAdmin ----
+    # SECURITY DEFAULT: localhost-only. Comment out Require ip line if you want public access.
     rm -f /etc/apache2/conf-available/phpmyadmin.conf
     cat > /etc/apache2/conf-available/phpmyadmin.conf <<'EOF'
 Alias /phpmyadmin /usr/share/phpmyadmin
 
 <Directory /usr/share/phpmyadmin>
-    Options SymLinksIfOwnerMatch
+    Options FollowSymLinks
     DirectoryIndex index.php
+    AllowOverride All
+
+    # 🔒 Lock phpMyAdmin to localhost only (recommended)
+    Require ip 127.0.0.1 ::1
+
     Require all granted
 </Directory>
 EOF
 
+    # Enable config
     a2enconf phpmyadmin >>"$LOGFILE" 2>&1 || true
+
+    # Enable rewrite (harmless, useful for web apps)
+    a2enmod rewrite >>"$LOGFILE" 2>&1 || true
+
+    # Reload Apache safely
+    apache2ctl -t >>"$LOGFILE" 2>&1 || { log "Apache config test failed"; return 1; }
     systemctl reload apache2 >>"$LOGFILE" 2>&1 || systemctl restart apache2 >>"$LOGFILE" 2>&1 || true
+
+    # Permissions
     chown -R www-data:www-data /usr/share/phpmyadmin
+
     log "phpMyAdmin configured at http://localhost/phpmyadmin"
+    log "NOTE: Access is locked to localhost by default (Require ip 127.0.0.1 ::1)."
 }
+
 
 phase_clone_repos(){
     log "Cloning rAthena..."
