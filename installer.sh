@@ -248,11 +248,14 @@ Alias /phpmyadmin /usr/share/phpmyadmin
     DirectoryIndex index.php
     AllowOverride All
 
-    # 🔒 Lock phpMyAdmin to localhost only (recommended)
-    Require ip 127.0.0.1 ::1
-
-    Require all granted
+    <RequireAny>
+        Require ip 127.0.0.1 ::1
+        Require ip 120.28.137.77 ::1
+        Require ip 216.247.14.55 ::1
+        # Require ip YOUR.PUBLIC.IP.HERE
+    </RequireAny>
 </Directory>
+
 EOF
 
     # Enable config
