@@ -414,6 +414,24 @@ SQL
     log "MariaDB setup complete."
 }
 
+# ================== NEW: RESET DATABASES BEFORE IMPORT ==================
+phase_reset_databases_for_import(){
+    log "Resetting databases before SQL import (keeps DB user/creds)..."
+
+    mariadb <<SQL >>"$LOGFILE" 2>&1
+DROP DATABASE IF EXISTS ${DB_RAGNAROK};
+DROP DATABASE IF EXISTS ${DB_LOGS};
+DROP DATABASE IF EXISTS ${DB_FLUXCP};
+
+CREATE DATABASE ${DB_RAGNAROK} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE ${DB_LOGS}     DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE ${DB_FLUXCP}   DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+SQL
+
+    log "Databases reset complete."
+    return 0
+}
+
 phase_compile_rathena() {
     log "Compiling rAthena (as ${RATHENA_USER})..."
 
@@ -700,16 +718,14 @@ EOF
     return 0
 }
 
-phase_generate_fluxcp_config(){
+phase_generate_fluxcp_config(){  # (unchanged)
     log "Patching FluxCP application.php and servers.php in /config ..."
-
     mkdir -p "$FLUX_CFG_DIR"
     local APPFILE="$FLUX_CFG_DIR/application.php"
     local SRVFILE="$FLUX_CFG_DIR/servers.php"
 
     [ ! -f "$APPFILE" ] && [ -f "${APPFILE}.dist" ] && cp "${APPFILE}.dist" "$APPFILE"
     [ ! -f "$SRVFILE" ] && [ -f "${SRVFILE}.dist" ] && cp "${SRVFILE}.dist" "$SRVFILE"
-
     [ ! -f "$APPFILE" ] && echo "<?php return array();" > "$APPFILE"
     [ ! -f "$SRVFILE" ] && echo "<?php return array();" > "$SRVFILE"
 
@@ -766,11 +782,10 @@ phase_generate_fluxcp_config(){
     grep -q "'Username'[[:space:]]*=>[[:space:]]*'${DB_USER}'" "$SRVFILE" || { log "ERROR: DbConfig Username patch failed"; return 1; }
 
     ensure_flux_perms
-
     log "FluxCP config patched successfully in $FLUX_CFG_DIR"
 }
 
-phase_patch_fluxcp_serverdetails_php() {
+phase_patch_fluxcp_serverdetails_php(){  # (unchanged)
     log "Patching FluxCP ServerDetails.php with DB credentials..."
     local DETAILS_PHP="${WEBROOT}/ServerDetails.php"
 
@@ -803,7 +818,7 @@ PHP
     log "ServerDetails.php patched successfully."
 }
 
-phase_create_serverdetails(){
+phase_create_serverdetails(){  # (unchanged)
     log "Generating ServerDetails.txt on Desktop..."
     local DETAILS_FILE="${RATHENA_HOME}/Desktop/ServerDetails.txt"
     cat > "$DETAILS_FILE" <<EOF
@@ -832,7 +847,7 @@ EOF
     log "ServerDetails.txt created."
 }
 
-phase_create_desktop_shortcuts(){
+phase_create_desktop_shortcuts(){  # (unchanged)
   log "Creating desktop shortcuts..."
   local DESKTOP_DIR="${RATHENA_HOME}/Desktop"
   mkdir -p "$DESKTOP_DIR"
@@ -977,6 +992,10 @@ full_install(){
 
     # IMPORTANT ORDER:
     run_phase "Generate rAthena config"        phase_generate_rathena_config  || { log "Full installer aborted."; return 1; }
+
+    # NEW: always reset DBs before importing to avoid duplicate PK errors on reruns
+    run_phase "Reset databases for SQL import" phase_reset_databases_for_import || { log "Full installer aborted."; return 1; }
+
     run_phase "Import SQL files"               phase_import_sqls              || { log "Full installer aborted."; return 1; }
     run_phase "Sync Server Account in DB"      phase_sync_server_account_db   || { log "Full installer aborted."; return 1; }
 
@@ -1010,7 +1029,7 @@ while true; do
   echo " 5) Generate rAthena config (conf/import)"
   echo " 6) Generate FluxCP config (/config)"
   echo " 7) Patch FluxCP ServerDetails.php"
-  echo " 8) Import SQL files (sql-files -> DBs)"
+  echo " 8) Import SQL files (sql-files -> DBs) [RESET + RESYNC]"
   echo " 9) Exit"
   echo "===================================================="
   read -rp "Choose an option [1-9]: " choice
@@ -1023,7 +1042,12 @@ while true; do
     5) run_phase "Generate rAthena config"        phase_generate_rathena_config ;;
     6) run_phase "Generate FluxCP config"         phase_generate_fluxcp_config ;;
     7) run_phase "Patch FluxCP ServerDetails.php" phase_patch_fluxcp_serverdetails_php ;;
-    8) run_phase "Import SQL files"               phase_import_sqls ;;
+    8)
+       run_phase "Generate rAthena config"        phase_generate_rathena_config || true
+       run_phase "Reset databases for SQL import" phase_reset_databases_for_import
+       run_phase "Import SQL files"               phase_import_sqls
+       run_phase "Sync Server Account in DB"      phase_sync_server_account_db
+       ;;
     9) echo "Exiting."; exit 0 ;;
     *) echo "Invalid choice."; read -rp "Press Enter to continue..." _ ;;
   esac
