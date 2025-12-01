@@ -22,6 +22,7 @@ CRED_FILE="/root/.rathena_db_credentials"
 
 # ================== SETUP LOG & ENV ==================
 export DEBIAN_FRONTEND=noninteractive
+
 mkdir -p "$(dirname "$LOGFILE")" "$STATE_DIR"
 touch "$LOGFILE" || true
 chmod 600 "$LOGFILE" 2>/dev/null || true
@@ -39,12 +40,14 @@ spinner() {
     local label="$2"
     local spin='-\|/'
     local i=0
+
     while kill -0 "$pid" 2>/dev/null; do
         if [ -t 1 ]; then
             printf "\r[%c] %s" "${spin:i++%4:1}" "$label"
         fi
         sleep 0.2
     done
+
     if [ -t 1 ]; then
         printf "\r[✓] %s\n" "$label"
     fi
@@ -53,21 +56,25 @@ spinner() {
 # ================== LOAD / GENERATE DB CREDENTIALS ==================
 if [ -f "$CRED_FILE" ]; then
     log "Loading existing DB credentials from $CRED_FILE"
+    # shellcheck source=/dev/null
     source "$CRED_FILE"
 else
     log "No existing DB credentials found. Generating new password..."
     DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || true)"
 fi
 
-# ================== PHASE WRAPPER (ERROR HANDLING) ==================
+# ================== PHASE WRAPPER ==================
 run_phase() {
     local label="$1"; shift
     log "=== Starting: ${label} ==="
+
     "$@" &
     local phase_pid=$!
+
     spinner "$phase_pid" "${label} in progress..."
     wait "$phase_pid"
     local rc=$?
+
     if [ $rc -ne 0 ]; then
         log "ERROR: ${label} failed with exit code ${rc}"
         echo
@@ -85,6 +92,7 @@ run_phase() {
         read -rp "Press Enter to return to the menu..." _
         return $rc
     fi
+
     log "=== Completed: ${label} ==="
     return 0
 }
@@ -92,7 +100,8 @@ run_phase() {
 # ================== PHASES ==================
 phase_update_upgrade(){
     log "Updating system..."
-    apt update && apt upgrade -y
+    apt update
+    apt upgrade -y
     log "System updated."
 }
 
@@ -129,7 +138,7 @@ phase_create_rathena_user(){
              "${RATHENA_HOME}/sql_imports" "${RATHENA_HOME}/db_backups"
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_HOME"
 
-    # Simple server control scripts
+    # create start/stop/restart scripts
     cat > "${RATHENA_HOME}/start_servers_xfce.sh" <<'BASH'
 #!/usr/bin/env bash
 set -e
@@ -175,7 +184,9 @@ phase_clone_repos(){
     sudo -u "$RATHENA_USER" git clone --depth 1 "$RATHENA_REPO" "$RATHENA_INSTALL_DIR" || log "Failed to clone rAthena"
 
     log "Cloning FluxCP into ${WEBROOT}..."
-    [ -d "$WEBROOT" ] && find "$WEBROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    if [ -d "$WEBROOT" ]; then
+        find "$WEBROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+    fi
     git clone --depth 1 https://github.com/rathena/FluxCP.git "$WEBROOT" || log "Failed to clone FluxCP"
     chown -R www-data:www-data "$WEBROOT"
 }
@@ -207,13 +218,20 @@ EOF
 phase_compile_rathena() {
     log "Compiling rAthena (as ${RATHENA_USER})..."
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR"
+
     sudo -u "$RATHENA_USER" bash -lc "cd '$RATHENA_INSTALL_DIR' && \
-        if [ -f Makefile ]; then make clean && make -j\$(nproc); \
-        elif [ -f CMakeLists.txt ]; then rm -rf build && mkdir -p build && cmake -S . -B build && cmake --build build -j\$(nproc); \
-        else echo 'No Makefile or CMakeLists.txt found' && exit 2; fi" >>"$LOGFILE" 2>&1 || {
-        log "Compilation failed. See $LOGFILE for details."
-        return 1
-    }
+        if [ -f Makefile ]; then \
+            make clean && make -j\$(nproc); \
+        elif [ -f CMakeLists.txt ]; then \
+            rm -rf build && mkdir -p build && cmake -S . -B build && cmake --build build -j\$(nproc); \
+        else \
+            echo 'No Makefile or CMakeLists.txt found' && exit 2; \
+        fi" >>"$LOGFILE" 2>&1 || {
+            log "Compilation failed. See $LOGFILE for details."
+            echo "rAthena compilation failed. Check ${LOGFILE} for compiler output."
+            return 1
+        }
+
     log "rAthena compiled successfully."
 }
 
@@ -234,17 +252,49 @@ phase_import_sqls(){
     log "SQL import completed."
 }
 
-phase_create_server_account(){
-    log "Creating server account in database..."
-    SERVER_USERID="$(tr -dc 'A-Za-z' </dev/urandom | head -c6)"
-    SERVER_USERPASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)"
-    mariadb "$DB_RAGNAROK" <<SQL
-INSERT INTO login (userid, user_pass, sex, logincount)
-VALUES ('$SERVER_USERID', '$SERVER_USERPASS', 0, 0)
-ON DUPLICATE KEY UPDATE user_pass=VALUES(user_pass);
-SQL
-    log "Server account created: userid='$SERVER_USERID' password='$SERVER_USERPASS'"
+phase_configure_phpmyadmin() {
+    log "Configuring phpMyAdmin..."
+
+    # Enable PHP modules required for phpMyAdmin
+    a2enmod php && systemctl restart apache2
+
+    # Check if phpMyAdmin is installed
+    if [ ! -d /usr/share/phpmyadmin ]; then
+        log "phpMyAdmin not found in /usr/share/phpmyadmin, skipping configuration."
+        return 1
+    fi
+
+    # Remove existing Apache alias if present
+    rm -f /etc/apache2/conf-available/phpmyadmin.conf
+
+    # Create Apache alias for phpMyAdmin
+    cat > /etc/apache2/conf-available/phpmyadmin.conf <<'EOF'
+Alias /phpmyadmin /usr/share/phpmyadmin
+
+<Directory /usr/share/phpmyadmin>
+    Options SymLinksIfOwnerMatch
+    DirectoryIndex index.php
+
+    <IfModule mod_php.c>
+        AddType application/x-httpd-php .php
+        php_flag magic_quotes_gpc Off
+        php_flag track_vars On
+        php_flag register_globals Off
+        php_admin_flag allow_url_fopen On
+        php_value include_path .
+    </IfModule>
+</Directory>
+EOF
+
+    a2enconf phpmyadmin
+    systemctl reload apache2 || systemctl restart apache2
+
+    # Set proper permissions
+    chown -R www-data:www-data /usr/share/phpmyadmin
+
+    log "phpMyAdmin configured and available at http://localhost/phpmyadmin"
 }
+
 
 phase_generate_fluxcp_config(){
     log "Patching FluxCP application.php and server.php..."
@@ -252,52 +302,55 @@ phase_generate_fluxcp_config(){
     SRVFILE="$WEBROOT/application/config/server.php"
 
     if [ -f "$APPFILE" ]; then
-        sed -i "s/'BaseURI'[[:space:]]*=>[[:space:]]*'[^']*'/'BaseURI' => '\/'/g" "$APPFILE"
-        sed -i "s/'InstallerPassword'[[:space:]]*=>[[:space:]]*'[^']*'/'InstallerPassword' => 'RyomaHostingPH'/g" "$APPFILE"
-        sed -i "s/'SiteTitle'[[:space:]]*=>[[:space:]]*'[^']*'/'SiteTitle' => 'Ragnarok Control Panel'/g" "$APPFILE"
-        sed -i "s/'DonationCurrency'[[:space:]]*=>[[:space:]]*'[^']*'/'DonationCurrency' => 'PHP'/g" "$APPFILE"
+        sed -i "s/'BaseURI'[[:space:]]*=>[[:space:]]*'[^']*'/'BaseURI' => '\/'/g" "$APPFILE" || true
+        sed -i "s/'InstallerPassword'[[:space:]]*=>[[:space:]]*'[^']*'/'InstallerPassword' => 'RyomaHostingPH'/g" "$APPFILE" || true
+        sed -i "s/'SiteTitle'[[:space:]]*=>[[:space:]]*'[^']*'/'SiteTitle' => 'Ragnarok Control Panel'/g" "$APPFILE" || true
+        sed -i "s/'DonationCurrency'[[:space:]]*=>[[:space:]]*'[^']*'/'DonationCurrency' => 'PHP'/g" "$APPFILE" || true
     else
         log "Warning: $APPFILE not found — skipping application.php patches."
     fi
 
     if [ -f "$SRVFILE" ]; then
-        sed -i "s/'ServerName'[[:space:]]*=>[[:space:]]*'[^']*'/'ServerName' => 'RagnaROK'/g" "$SRVFILE"
-        sed -i "/'DbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {\
-            s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/;\
-            s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/;\
-            s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;\
-            s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/;\
-            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/;\
-        }" "$SRVFILE"
+        sed -i "s/'ServerName'[[:space:]]*=>[[:space:]]*'[^']*'/'ServerName' => 'RagnaROK'/g" "$SRVFILE" || true
 
-        sed -i "/'LogsDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {\
-            s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/;\
-            s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;\
-            s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/;\
-            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_LOGS}'/;\
-        }" "$SRVFILE"
+        sed -i "/'DbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
+            s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/;
+            s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/;
+            s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;
+            s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/;
+            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/;
+        }" "$SRVFILE" || true
 
-        sed -i "/'WebDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {\
-            s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/;\
-            s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;\
-            s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/;\
-            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/;\
-        }" "$SRVFILE"
+        sed -i "/'LogsDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
+            s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/;
+            s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;
+            s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/;
+            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_LOGS}'/;
+        }" "$SRVFILE" || true
+
+        sed -i "/'WebDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
+            s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/;
+            s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;
+            s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/;
+            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/;
+        }" "$SRVFILE" || true
+
     else
         log "Warning: $SRVFILE not found — skipping server.php patches."
     fi
 
-    chown -R www-data:www-data "$WEBROOT"
+    chown -R www-data:www-data "$WEBROOT" || true
     usermod -a -G www-data rathena 2>/dev/null || true
     chmod -R 0774 "$WEBROOT" 2>/dev/null || true
-
     log "FluxCP config patch attempt finished."
 }
 
 phase_generate_rathena_config(){
     log "Generating rAthena import config files..."
     mkdir -p "$RATHENA_INSTALL_DIR/conf/import"
-    USERID="$(tr -dc 'A-Za-z' </dev/urandom | head -c6)"
+
+    # Automatic generation of server account
+    USERID="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c6)"
     USERPASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)"
     SERVER_IP="$(hostname -I | awk '{print $1}')"
 
@@ -333,75 +386,93 @@ EOF
     log "rAthena import config generated."
 }
 
-phase_generate_serverdetails(){
-    log "Generating ServerDetails.txt on Desktop..."
-    DETAILS_FILE="${RATHENA_HOME}/Desktop/ServerDetails.txt"
-    SERVER_IP="$(hostname -I | awk '{print $1}')"
-
+phase_create_serverdetails(){
+    log "Writing ServerDetails.txt..."
+    DETAILS_FILE="$RATHENA_HOME/Desktop/ServerDetails.txt"
     cat > "$DETAILS_FILE" <<EOF
 === rAthena Server Details ===
+rAthena dir: ${RATHENA_INSTALL_DIR}
+FluxCP webroot: ${WEBROOT}
 
-Server Account:
-  UserID: $SERVER_USERID
-  Password: $SERVER_USERPASS
+DB user: ${DB_USER}
+DB password: ${DB_PASS}
+Databases: ${DB_RAGNAROK}, ${DB_LOGS}, ${DB_FLUXCP}
 
-Database:
-  Host: 127.0.0.1
-  User: $DB_USER
-  Password: $DB_PASS
-  Ragnarok DB: $DB_RAGNAROK
-  Logs DB: $DB_LOGS
-  FluxCP DB: $DB_FLUXCP
+Server account:
+  userid: ${USERID}
+  password: ${USERPASS}
 
-FluxCP URL:
-  http://$SERVER_IP/
+phpMyAdmin: http://localhost/phpmyadmin
+FluxCP: http://localhost/
 
-rAthena Path:
-  $RATHENA_INSTALL_DIR
-
-FluxCP Path:
-  $WEBROOT
+VNC user: ${RATHENA_USER}
+VNC password: ${DEFAULT_VNC_PASSWORD}
 EOF
-
     chown "${RATHENA_USER}:${RATHENA_USER}" "$DETAILS_FILE"
-    chmod 600 "$DETAILS_FILE"
-    log "ServerDetails.txt generated at ${DETAILS_FILE}"
+    log "ServerDetails.txt written."
 }
 
+phase_clean_all(){
+    log "Cleaning previous rAthena installation completely..."
 
-# --- The rest of phases: create serverdetails, desktop shortcuts, clean, regenerate DB password ---
-# (Keep them as you already have them, with minor ownership/log fixes.)
+    systemctl stop vncserver@1.service 2>/dev/null || true
 
-# ================== MAIN INSTALLER ==================
-full_install(){
-    log "Starting full installer..."
-    run_phase "System update & upgrade"         phase_update_upgrade
-    run_phase "Install base packages"           phase_install_packages
-    run_phase "Install Chrome/Chromium"         phase_install_chrome
-    run_phase "Create rAthena user"             phase_create_rathena_user
-    run_phase "Clone rAthena and FluxCP"        phase_clone_repos
-    run_phase "Setup MariaDB"                   phase_setup_mariadb
-    run_phase "Compile rAthena"                 phase_compile_rathena
-    run_phase "Import SQL files"                phase_import_sqls
-    run_phase "Create server account in DB"     phase_create_server_account
-    run_phase "Generate rAthena configs"        phase_generate_rathena_config
-    run_phase "Generate FluxCP configs"         phase_generate_fluxcp_config
-    run_phase "Generate server details"         phase_generate_serverdetails
-    log "Full installer completed successfully."
+    rm -rf "$RATHENA_INSTALL_DIR" "$WEBROOT" "$RATHENA_HOME/Desktop/"*.desktop \
+           "$RATHENA_HOME/Desktop/ServerDetails.txt" \
+           "$RATHENA_HOME/sql_imports" "$RATHENA_HOME/db_backups" \
+           "$RATHENA_HOME/.vnc" "$RATHENA_HOME/.config/autostart"
+
+    rm -f "$CRED_FILE"
+
+    mariadb <<SQL
+DROP DATABASE IF EXISTS ${DB_RAGNAROK};
+DROP DATABASE IF EXISTS ${DB_LOGS};
+DROP DATABASE IF EXISTS ${DB_FLUXCP};
+DROP USER IF EXISTS '${DB_USER}'@'localhost';
+FLUSH PRIVILEGES;
+SQL
+
+    log "Clean complete. All rAthena files, databases, and credentials removed."
 }
 
-# ================== ENTRY POINT ==================
-case "${1:-}" in
-    run)
-        full_install
-        ;;
-    clean)
-        log "Cleaning previous installation artifacts..."
-        rm -rf "$RATHENA_INSTALL_DIR" "$WEBROOT" "$STATE_DIR" "$CRED_FILE"
-        log "Cleanup complete."
-        ;;
-    *)
-        echo "Usage: $0 {run|clean}"
-        exit 1
-        ;;
-esac
+# ================== MENU ==================
+main_menu(){
+    while true; do
+        echo
+        echo "Rathena Installer Menu"
+        echo "====================="
+        echo "1) Full Install"
+        echo "2) Clean previous install"
+        echo "3) Exit"
+        read -rp "Choose an option: " choice
+        case "$choice" in
+            1)
+                run_phase "Update & Upgrade" phase_update_upgrade
+                run_phase "Install Packages" phase_install_packages
+                run_phase "Install Chrome" phase_install_chrome
+                run_phase "Create rAthena User" phase_create_rathena_user
+                run_phase "Clone Repos" phase_clone_repos
+                run_phase "Setup MariaDB" phase_setup_mariadb
+                run_phase "Configure phpMyAdmin" phase_configure_phpmyadmin || { log "Full installer aborted."; return 1; }
+                run_phase "Compile rAthena" phase_compile_rathena
+                run_phase "Import SQLs" phase_import_sqls
+                run_phase "Generate rAthena Configs" phase_generate_rathena_config
+                run_phase "Generate FluxCP Configs" phase_generate_fluxcp_config
+                run_phase "Create ServerDetails.txt" phase_create_serverdetails
+                echo "Installation complete!"
+                ;;
+            2)
+                run_phase "Clean previous install" phase_clean_all
+                ;;
+            3)
+                exit 0
+                ;;
+            *)
+                echo "Invalid choice."
+                ;;
+        esac
+    done
+}
+
+# ================== START ==================
+main_menu
