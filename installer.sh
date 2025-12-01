@@ -130,7 +130,7 @@ phase_create_rathena_user(){
              "${RATHENA_HOME}/sql_imports" "${RATHENA_HOME}/db_backups"
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_HOME"
 
-    # Create simple start/stop/restart server scripts
+    # Create server scripts (start/stop/restart)
     cat > "${RATHENA_HOME}/start_servers_xfce.sh" <<'BASH'
 #!/usr/bin/env bash
 set -e
@@ -167,6 +167,35 @@ BASH
         systemctl enable --now vncserver@1.service 2>/dev/null || true
     fi
     log "User ${RATHENA_USER} prepared."
+}
+
+phase_configure_phpmyadmin(){
+    log "Configuring phpMyAdmin..."
+    # Enable correct PHP module for Debian 12
+    if [ -f /etc/apache2/mods-available/php8.2.load ]; then
+        a2enmod php8.2
+    fi
+    systemctl enable --now apache2
+
+    if [ ! -d /usr/share/phpmyadmin ]; then
+        log "phpMyAdmin not found, skipping configuration."
+        return 1
+    fi
+
+    rm -f /etc/apache2/conf-available/phpmyadmin.conf
+    cat > /etc/apache2/conf-available/phpmyadmin.conf <<'EOF'
+Alias /phpmyadmin /usr/share/phpmyadmin
+
+<Directory /usr/share/phpmyadmin>
+    Options SymLinksIfOwnerMatch
+    DirectoryIndex index.php
+</Directory>
+EOF
+
+    a2enconf phpmyadmin
+    systemctl reload apache2 || systemctl restart apache2
+    chown -R www-data:www-data /usr/share/phpmyadmin
+    log "phpMyAdmin configured at http://localhost/phpmyadmin"
 }
 
 phase_clone_repos(){
@@ -214,14 +243,18 @@ phase_compile_rathena() {
     fi
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR"
 
-    sudo -u "$RATHENA_USER" bash -lc "cd '$RATHENA_INSTALL_DIR' && \
-        if [ -f Makefile ]; then \
-            make clean && make -j\$(nproc); \
-        elif [ -f CMakeLists.txt ]; then \
-            rm -rf build && mkdir -p build && cmake -S . -B build && cmake --build build -j\$(nproc); \
-        else \
-            echo 'No Makefile or CMakeLists.txt found' && exit 2; \
-        fi" >>"$LOGFILE" 2>&1 || { log "Compilation failed. See $LOGFILE"; return 1; }
+    sudo -u "$RATHENA_USER" bash -c "
+cd '$RATHENA_INSTALL_DIR' &&
+if [ -f Makefile ]; then
+    make clean && make -j\$(nproc)
+elif [ -f CMakeLists.txt ]; then
+    rm -rf build && mkdir -p build &&
+    cmake -S . -B build &&
+    cmake --build build -j\$(nproc)
+else
+    echo 'No Makefile or CMakeLists.txt found' && exit 2
+fi
+" >>"$LOGFILE" 2>&1 || { log "Compilation failed. See $LOGFILE"; return 1; }
 
     log "rAthena compiled successfully."
 }
@@ -285,9 +318,8 @@ EOF
     log "rAthena import config generated."
 }
 
-phase_generate_fluxcp_config() {
+phase_generate_fluxcp_config(){
     log "Patching FluxCP application.php and server.php..."
-
     APPFILE="$WEBROOT/application/config/application.php"
     SRVFILE="$WEBROOT/application/config/server.php"
 
@@ -302,7 +334,6 @@ phase_generate_fluxcp_config() {
 
     if [ -f "$SRVFILE" ]; then
         sed -i "s/'ServerName'[[:space:]]*=>[[:space:]]*'[^']*'/'ServerName' => 'RagnaROK'/g" "$SRVFILE" || true
-
         sed -i "/'DbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
             s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/;
             s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/;
@@ -322,106 +353,57 @@ phase_generate_fluxcp_config() {
             s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/;
             s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;
             s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/;
-            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/;
+            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_FLUXCP}'/;
         }" "$SRVFILE" || true
-
     else
         log "Warning: $SRVFILE not found — skipping server.php patches."
     fi
-
-    chown -R www-data:www-data "$WEBROOT" || true
-    usermod -a -G www-data rathena 2>/dev/null || true
-    chmod -R 0774 "$WEBROOT" 2>/dev/null || true
-    log "FluxCP config patch attempt finished."
 }
 
-phase_create_serverdetails(){
-    log "Writing ServerDetails.txt..."
-    DETAILS_FILE="$RATHENA_HOME/Desktop/ServerDetails.txt"
-    cat > "$DETAILS_FILE" <<EOF
-=== rAthena Server Details ===
-rAthena dir: ${RATHENA_INSTALL_DIR}
-FluxCP webroot: ${WEBROOT}
+phase_generate_serverdetails(){
+    log "Generating ServerDetails.txt on Desktop..."
+    cat > "${RATHENA_HOME}/Desktop/ServerDetails.txt" <<EOF
+Rathena Credentials:
+  DB_USER: ${DB_USER}
+  DB_PASS: ${DB_PASS}
+  DB_NAME: ${DB_RAGNAROK}
+  DB_LOGS: ${DB_LOGS}
+  DB_FLUXCP: ${DB_FLUXCP}
 
-DB user: ${DB_USER}
-DB password: ${DB_PASS}
-Databases: ${DB_RAGNAROK}, ${DB_LOGS}, ${DB_FLUXCP}
-
-phpMyAdmin: http://localhost/phpmyadmin
-FluxCP: http://localhost/
-
-VNC user: ${RATHENA_USER}
-VNC password: ${DEFAULT_VNC_PASSWORD}
+FluxCP InstallerPassword: RyomaHostingPH
 EOF
-    chown "${RATHENA_USER}:${RATHENA_USER}" "$DETAILS_FILE"
-    log "ServerDetails.txt written."
+    chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/Desktop/ServerDetails.txt"
+    chmod 600 "${RATHENA_HOME}/Desktop/ServerDetails.txt"
+    log "ServerDetails.txt created."
 }
 
-phase_clean_all(){
-    log "Cleaning previous rAthena installation completely..."
-    systemctl stop vncserver@1.service 2>/dev/null || true
-    systemctl disable vncserver@1.service 2>/dev/null || true
-    systemctl stop apache2 2>/dev/null || true
-    systemctl stop mariadb 2>/dev/null || true
-    rm -rf "$RATHENA_INSTALL_DIR" "$WEBROOT" "$STATE_DIR" "$CRED_FILE"
-    log "Cleaned all installation directories, configs, and credentials."
+# ================== CLEAN PHASE ==================
+phase_clean(){
+    log "Cleaning all installation artifacts..."
+    systemctl stop apache2 mariadb vncserver@1.service 2>/dev/null || true
+    rm -rf "$RATHENA_INSTALL_DIR" "$WEBROOT" "$CRED_FILE"
+    log "All artifacts cleaned."
 }
 
-phase_configure_phpmyadmin(){
-    log "Configuring phpMyAdmin..."
+# ================== RUN MENU ==================
+if [ "${1:-}" = "clean" ]; then
+    run_phase "Clean Installer Artifacts" phase_clean
+    exit 0
+fi
 
-    a2enmod php && systemctl restart apache2
+# Full run
+run_phase "System Update/Upgrade" phase_update_upgrade
+run_phase "Install Packages" phase_install_packages
+run_phase "Install Google Chrome" phase_install_chrome
+run_phase "Create rAthena User & Setup XFCE" phase_create_rathena_user
+run_phase "Configure phpMyAdmin" phase_configure_phpmyadmin
+run_phase "Clone Repositories" phase_clone_repos
+run_phase "Setup MariaDB & Credentials" phase_setup_mariadb
+run_phase "Compile rAthena" phase_compile_rathena
+run_phase "Import SQL Files" phase_import_sqls
+run_phase "Generate rAthena Configs" phase_generate_rathena_config
+run_phase "Patch FluxCP Configs" phase_generate_fluxcp_config
+run_phase "Generate ServerDetails.txt" phase_generate_serverdetails
 
-    if [ ! -d /usr/share/phpmyadmin ]; then
-        log "phpMyAdmin not found, skipping configuration."
-        return 1
-    fi
-
-    rm -f /etc/apache2/conf-available/phpmyadmin.conf
-    cat > /etc/apache2/conf-available/phpmyadmin.conf <<'EOF'
-Alias /phpmyadmin /usr/share/phpmyadmin
-
-<Directory /usr/share/phpmyadmin>
-    Options SymLinksIfOwnerMatch
-    DirectoryIndex index.php
-</Directory>
-EOF
-
-    a2enconf phpmyadmin
-    systemctl reload apache2 || systemctl restart apache2
-    chown -R www-data:www-data /usr/share/phpmyadmin
-    log "phpMyAdmin configured at http://localhost/phpmyadmin"
-}
-
-# ================== INSTALLER EXECUTION ==================
-run_installer(){
-    run_phase "Update & Upgrade" phase_update_upgrade
-    run_phase "Install Packages" phase_install_packages
-    run_phase "Install Chrome/Chromium" phase_install_chrome
-    run_phase "Create rAthena User & Scripts" phase_create_rathena_user
-    run_phase "Configure phpMyAdmin" phase_configure_phpmyadmin
-    run_phase "Clone rAthena & FluxCP" phase_clone_repos
-    run_phase "Setup MariaDB Databases" phase_setup_mariadb
-    run_phase "Compile rAthena" phase_compile_rathena
-    run_phase "Import SQL Files" phase_import_sqls
-    run_phase "Generate rAthena Config" phase_generate_rathena_config
-    run_phase "Patch FluxCP Config" phase_generate_fluxcp_config
-    run_phase "Create ServerDetails.txt" phase_create_serverdetails
-
-    log "rAthena + FluxCP + phpMyAdmin installer completed successfully!"
-}
-
-# ================== SCRIPT MENU ==================
-case "${1:-}" in
-    run)
-        run_installer
-        ;;
-    clean)
-        phase_clean_all
-        ;;
-    *)
-        echo "Usage:"
-        echo "  $0 run    - perform full installer"
-        echo "  $0 clean  - remove previous installation completely"
-        ;;
-esac
+log "=== Installer completed successfully ==="
+echo "Installation completed! ServerDetails.txt is on rathena Desktop."
