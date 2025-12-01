@@ -501,6 +501,23 @@ phase_import_sqls(){
 phase_sync_server_account_db(){
     log "Syncing inter-server USERID/USERPASS into login server account (sex='S')..."
 
+    # --- reload creds because previous phase ran in a subshell ---
+    if [ -f "$CRED_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$CRED_FILE" || true
+    fi
+
+    # --- if still empty, read from generated import configs ---
+    local import_dir="${RATHENA_INSTALL_DIR}/conf/import"
+    local char_conf="${import_dir}/char_conf.txt"
+
+    if [ -z "${USERID:-}" ] && [ -f "$char_conf" ]; then
+        USERID="$(sed -n 's/^userid:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
+    fi
+    if [ -z "${USERPASS:-}" ] && [ -f "$char_conf" ]; then
+        USERPASS="$(sed -n 's/^passwd:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
+    fi
+
     [ -n "${USERID:-}" ]   || { log "USERID empty, cannot sync server account"; return 1; }
     [ -n "${USERPASS:-}" ] || { log "USERPASS empty, cannot sync server account"; return 1; }
 
