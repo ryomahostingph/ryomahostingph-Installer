@@ -137,12 +137,14 @@ phase_update_upgrade(){
 phase_install_packages(){
     log "Installing base packages..."
     apt_install sudo build-essential git cmake autoconf libssl-dev \
-      libmariadb-dev-compat libmariadb-dev libpcre3-dev zlib1g-dev libxml2-dev \
-      wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring \
-      mariadb-server mariadb-client \
-      dbus-x11 xauth xorg ufw tightvncserver xfce4 xfce4-goodies x11-xserver-utils \
-      phpmyadmin imagemagick xterm xfce4-terminal htop xdg-utils dos2unix \
-      perl >>"$LOGFILE" 2>&1 || return 1
+    libmariadb-dev-compat libmariadb-dev libpcre3-dev zlib1g-dev libxml2-dev \
+    wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring \
+    php-curl php-zip php-tidy \
+    mariadb-server mariadb-client \
+    dbus-x11 xauth xorg ufw tightvncserver xfce4 xfce4-goodies x11-xserver-utils \
+    phpmyadmin imagemagick xterm xfce4-terminal htop xdg-utils dos2unix \
+    perl >>"$LOGFILE" 2>&1 || return 1
+
     log "Base packages installed."
 }
 
