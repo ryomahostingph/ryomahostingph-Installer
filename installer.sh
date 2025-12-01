@@ -503,6 +503,14 @@ ipban_db_pw: ${DB_PASS}
 char_server_pw: ${DB_PASS}
 map_server_pw: ${DB_PASS}
 log_db_pw: ${DB_PASS}
+web_server_pw: ${DB_PASS}
+login_server_db: ${DB_USER}
+ipban_db_db: ${DB_USER}
+char_server_db: ${DB_USER}
+map_server_db: ${DB_USER}
+web_server_db: ${DB_USER}
+log_db_db: ${DB_LOGS}
+
 EOF
 
     cat > "$db_conf" <<EOF
@@ -593,6 +601,26 @@ phase_generate_fluxcp_config(){
         s|('Password'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_PASS}'|g
         s|('Database'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_FLUXCP}'|g
     }" "$SRVFILE"
+
+    # ---------------- LoginServer patches / insert ----------------
+    if grep -q "'LoginServer'[[:space:]]*=>[[:space:]]*array" "$SRVFILE"; then
+        sed -i -E "/'LoginServer'[[:space:]]*=>[[:space:]]*array\(/,/^[[:space:]]*\),/ {
+            s|('Address'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'127.0.0.1'|g
+            s|('Port'[[:space:]]*=>[[:space:]]*)[0-9]+|\1 6900|g
+            s|('UseMD5'[[:space:]]*=>[[:space:]]*)[^,)]*|\1true|g
+        }" "$SRVFILE"
+    else
+        sed -i -E "/'ServerName'[[:space:]]*=>/a\\
+\\
+        'LoginServer'    => array(\\
+            'Address'  => '127.0.0.1',\\
+            'Port'     => 6900,\\
+            'UseMD5'   => true,\\
+        ),\\
+" "$SRVFILE"
+    fi
+}
+
 
     # ---- Post-patch validation (fail phase if missed) ----
     grep -q "'BaseURI'[[:space:]]*=>[[:space:]]*'/'" "$APPFILE" || { log "ERROR: BaseURI patch failed"; return 1; }
