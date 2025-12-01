@@ -759,11 +759,11 @@ full_install(){
     run_phase "Patch FluxCP ServerDetails.php" phase_patch_fluxcp_serverdetails_php || { log "Full installer aborted."; return 1; }
 
     run_phase "Compile rAthena"                phase_compile_rathena          || { log "Full installer aborted."; return 1; }
-    run_phase "Generate rAthena config"        phase_generate_rathena_config  || { log "Full installer aborted."; return 1; }
-    run_phase "Validate rAthena setup"         phase_validate_rathena_setup   || { log "Full installer aborted."; return 1; }
 
     run_phase "Create ServerDetails.txt"       phase_create_serverdetails     || { log "Full installer aborted."; return 1; }
     run_phase "Create desktop shortcuts"       phase_create_desktop_shortcuts || { log "Full installer aborted."; return 1; }
+    run_phase "Generate rAthena config"        phase_generate_rathena_config  || { log "Full installer aborted."; return 1; }
+    run_phase "Validate rAthena setup"         phase_validate_rathena_setup   || { log "Full installer aborted."; return 1; }
 
     log "Full installer finished successfully."
     echo
