@@ -250,8 +250,8 @@ Alias /phpmyadmin /usr/share/phpmyadmin
 
     <RequireAny>
         Require ip 127.0.0.1 ::1
-        Require ip 120.28.137.77 ::1
-        Require ip 216.247.14.55 ::1
+        Require ip 120.28.137.77
+        Require ip 216.247.14.55
         # Require ip YOUR.PUBLIC.IP.HERE
     </RequireAny>
 </Directory>
