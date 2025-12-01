@@ -18,6 +18,10 @@ DB_RAGNAROK="ragnarok"
 DB_LOGS="ragnarok_logs"
 DB_FLUXCP="fluxcp"
 
+# Server-to-server credentials (char/map/login)
+USERID=""
+USERPASS=""
+
 CRED_FILE="/root/.rathena_db_credentials"
 
 # ================== SETUP LOG & ENV ==================
@@ -169,7 +173,7 @@ BASH
     chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/restart_servers_xfce.sh"
 
     # Enable VNC if template unit exists
-    if systemctl list-unit-files | grep -q '^vncserver@'; then
+    if systemctl list-unit-files 2>/dev/null | grep -q '^vncserver@'; then
         systemctl enable --now vncserver@1.service 2>/dev/null || true
     fi
 
@@ -178,7 +182,7 @@ BASH
 
 phase_configure_phpmyadmin(){
     log "Configuring phpMyAdmin..."
-    # Enable correct PHP module for Debian 12 if present
+    # Enable PHP module (Debian 12)
     if [ -f /etc/apache2/mods-available/php8.2.load ]; then
         a2enmod php8.2
     fi
@@ -318,36 +322,143 @@ phase_import_sqls(){
         for f in "$dir"/*.sql; do
             [ -e "$f" ] || continue
             case "$(basename "$f")" in
-                main.sql) mariadb "$DB_RAGNAROK" < "$f" && log "Imported main.sql";;
-                logs.sql) mariadb "$DB_LOGS" < "$f" && log "Imported logs.sql";;
-                *) mariadb "$DB_RAGNAROK" < "$f" && log "Imported $(basename "$f")";;
+                main.sql)
+                    mariadb "$DB_RAGNAROK" < "$f" && log "Imported main.sql"
+                    ;;
+                logs.sql)
+                    mariadb "$DB_LOGS" < "$f" && log "Imported logs.sql"
+                    ;;
+                *)
+                    mariadb "$DB_RAGNAROK" < "$f" && log "Imported $(basename "$f")"
+                    ;;
             esac
         done
     done
     log "SQL import completed."
 }
 
+# ---------- validation helper ----------
+validate_rathena_imports() {
+    local import_dir="$1"
+    local char_conf="$import_dir/char_conf.txt"
+    local map_conf="$import_dir/map_conf.txt"
+    local inter_conf="$import_dir/inter_conf.txt"
+    local db_conf="$import_dir/rathena_db.conf"
+
+    log "Validating rAthena import configs in ${import_dir}..."
+
+    local warn=0
+
+    # Required files
+    for f in "$char_conf" "$map_conf" "$inter_conf" "$db_conf"; do
+        if [ ! -f "$f" ]; then
+            log "WARNING: Missing import config file: $f"
+            warn=1
+        fi
+    done
+
+    if [ $warn -ne 0 ]; then
+        echo "WARNING: One or more rAthena import files are missing. Server may fail to start."
+        return 0
+    fi
+
+    # Server credentials from char/map
+    local char_user char_pass map_user map_pass
+
+    char_user="$(sed -n 's/^userid:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
+    char_pass="$(sed -n 's/^passwd:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
+
+    map_user="$(sed -n 's/^userid:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$map_conf" | head -n1)"
+    map_pass="$(sed -n 's/^passwd:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$map_conf" | head -n1)"
+
+    if [ "$char_user" != "$map_user" ] || [ "$char_pass" != "$map_pass" ]; then
+        log "WARNING: char_conf.txt and map_conf.txt have mismatched userid/pass."
+        log "         char: ${char_user}/${char_pass}, map: ${map_user}/${map_pass}"
+        echo "WARNING: Server connection credentials differ between char/map configs."
+        warn=1
+    else
+        log "Server credentials match between char_conf.txt and map_conf.txt (${char_user}/****)."
+    fi
+
+    # DB config vs installer vars
+    local db_user db_pass db_main db_logs db_flux
+
+    db_user="$(sed -n 's/^db_user="\([^"]*\)".*$/\1/p' "$db_conf" | head -n1)"
+    db_pass="$(sed -n 's/^db_pass="\([^"]*\)".*$/\1/p' "$db_conf" | head -n1)"
+    db_main="$(sed -n 's/^db_database="\([^"]*\)".*$/\1/p' "$db_conf" | head -n1)"
+    db_logs="$(sed -n 's/^db_logs="\([^"]*\)".*$/\1/p' "$db_conf" | head -n1)"
+    db_flux="$(sed -n 's/^db_fluxcp="\([^"]*\)".*$/\1/p' "$db_conf" | head -n1)"
+
+    if [ "$db_user" != "$DB_USER" ] || [ "$db_pass" != "$DB_PASS" ]; then
+        log "WARNING: rathena_db.conf DB credentials differ from installer values."
+        log "         In file: ${db_user}/****, expected: ${DB_USER}/****"
+        warn=1
+    fi
+
+    if [ "$db_main" != "$DB_RAGNAROK" ] || [ "$db_logs" != "$DB_LOGS" ] || [ "$db_flux" != "$DB_FLUXCP" ]; then
+        log "WARNING: rathena_db.conf database names differ from installer variables."
+        log "         In file: main=${db_main}, logs=${db_logs}, flux=${db_flux}"
+        log "         Expected: main=${DB_RAGNAROK}, logs=${DB_LOGS}, flux=${DB_FLUXCP}"
+        warn=1
+    fi
+
+    if [ $warn -eq 0 ]; then
+        log "rAthena import config validation OK (server credentials + DB settings consistent)."
+    else
+        echo "WARNING: Some rAthena import settings look inconsistent. Check the log at:"
+        echo "         ${LOGFILE}"
+    fi
+
+    return 0
+}
+
 phase_generate_rathena_config(){
     log "Generating rAthena import config files..."
-    mkdir -p "$RATHENA_INSTALL_DIR/conf/import"
+    local import_dir="$RATHENA_INSTALL_DIR/conf/import"
+    mkdir -p "$import_dir"
 
-    USERID="$(tr -dc 'A-Za-z' </dev/urandom | head -c6)"
-    USERPASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8)"
-    SERVER_IP="$(hostname -I | awk '{print $1}')"
+    local char_conf="$import_dir/char_conf.txt"
+    local map_conf="$import_dir/map_conf.txt"
+    local inter_conf="$import_dir/inter_conf.txt"
+    local db_conf="$import_dir/rathena_db.conf"
 
-    cat > "$RATHENA_INSTALL_DIR/conf/import/char_conf.txt" <<EOF
+    # Reuse existing USERID/USERPASS from char_conf if present
+    if [ -z "$USERID" ] && [ -f "$char_conf" ]; then
+        USERID="$(sed -n 's/^userid:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
+        USERPASS="$(sed -n 's/^passwd:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
+    fi
+
+    if [ -z "$USERID" ]; then
+        USERID="$(tr -dc 'A-Za-z' </dev/urandom | head -c6 || echo s1)"
+        log "Generated new server userid: ${USERID}"
+    else
+        log "Reusing server userid: ${USERID}"
+    fi
+
+    if [ -z "$USERPASS" ]; then
+        USERPASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8 || echo p1)"
+        log "Generated new server password for userid ${USERID}"
+    else
+        log "Reusing server password for userid ${USERID}"
+    fi
+
+    local SERVER_IP
+    SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [ -n "$SERVER_IP" ] || SERVER_IP="127.0.0.1"
+
+    cat > "$char_conf" <<EOF
 userid: ${USERID}
 passwd: ${USERPASS}
 char_ip: ${SERVER_IP}
 EOF
 
-    cat > "$RATHENA_INSTALL_DIR/conf/import/map_conf.txt" <<EOF
+    cat > "$map_conf" <<EOF
 userid: ${USERID}
 passwd: ${USERPASS}
 map_ip: ${SERVER_IP}
 EOF
 
-    cat > "$RATHENA_INSTALL_DIR/conf/import/inter_conf.txt" <<EOF
+    cat > "$inter_conf" <<EOF
 login_server_pw: ${DB_PASS}
 ipban_db_pw: ${DB_PASS}
 char_server_pw: ${DB_PASS}
@@ -355,7 +466,7 @@ map_server_pw: ${DB_PASS}
 log_db_pw: ${DB_PASS}
 EOF
 
-    cat > "$RATHENA_INSTALL_DIR/conf/import/rathena_db.conf" <<EOF
+    cat > "$db_conf" <<EOF
 db_ip="127.0.0.1"
 db_user="${DB_USER}"
 db_pass="${DB_PASS}"
@@ -364,8 +475,43 @@ db_logs="${DB_LOGS}"
 db_fluxcp="${DB_FLUXCP}"
 EOF
 
-    chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR/conf/import"
+    chown -R "${RATHENA_USER}:${RATHENA_USER}" "$import_dir"
     log "rAthena import config generated."
+
+    validate_rathena_imports "$import_dir"
+}
+
+phase_validate_rathena_setup(){
+    log "Running post-compile rAthena setup validation..."
+
+    local import_dir="$RATHENA_INSTALL_DIR/conf/import"
+    if [ ! -d "$import_dir" ]; then
+        log "WARNING: rAthena import directory missing at ${import_dir}"
+        echo "WARNING: rAthena import directory is missing. Server may not start correctly."
+    else
+        validate_rathena_imports "$import_dir"
+    fi
+
+    # Check server binaries (login/char/map)
+    local bin_dir="$RATHENA_INSTALL_DIR"
+    [ -d "$RATHENA_INSTALL_DIR/build" ] && bin_dir="$RATHENA_INSTALL_DIR/build"
+
+    local missing=0
+    for s in login-server char-server map-server; do
+        if ! find "$bin_dir" -maxdepth 2 -type f -name "$s" -perm -u+x 2>/dev/null | head -n1 | grep -q .; then
+            log "WARNING: rAthena server binary '$s' not found or not executable under ${bin_dir}"
+            missing=1
+        fi
+    done
+
+    if [ $missing -ne 0 ]; then
+        echo "WARNING: One or more rAthena server binaries are missing or not executable."
+        echo "         Check build output in: ${LOGFILE}"
+    else
+        log "rAthena server binaries appear to exist (login/char/map)."
+    fi
+
+    return 0
 }
 
 phase_generate_fluxcp_config(){
@@ -404,7 +550,7 @@ phase_generate_fluxcp_config(){
         s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_LOGS}'/;
     }" "$SRVFILE"
 
-    # WebDbConfig (using FluxCP DB)
+    # WebDbConfig
     sed -i "/'WebDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
         s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/;
         s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;
@@ -430,6 +576,10 @@ FluxCP webroot: ${WEBROOT}
 DB user: ${DB_USER}
 DB password: ${DB_PASS}
 Databases: ${DB_RAGNAROK}, ${DB_LOGS}, ${DB_FLUXCP}
+
+Server connection account (char/map/login):
+  userid: ${USERID}
+  password: ${USERPASS}
 
 phpMyAdmin: http://localhost/phpmyadmin
 FluxCP: http://localhost/
@@ -579,6 +729,7 @@ full_install(){
     run_phase "Generate FluxCP config"        phase_generate_fluxcp_config || { log "Full installer aborted."; return 1; }
     run_phase "Generate rAthena config"       phase_generate_rathena_config || { log "Full installer aborted."; return 1; }
     run_phase "Compile rAthena"               phase_compile_rathena      || { log "Full installer aborted."; return 1; }
+    run_phase "Validate rAthena setup"        phase_validate_rathena_setup || { log "Full installer aborted."; return 1; }
     run_phase "Create ServerDetails.txt"      phase_create_serverdetails || { log "Full installer aborted."; return 1; }
     run_phase "Create desktop shortcuts"      phase_create_desktop_shortcuts || { log "Full installer aborted."; return 1; }
 
