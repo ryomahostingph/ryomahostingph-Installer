@@ -839,19 +839,23 @@ while true; do
   echo " 5) Generate rAthena config (conf/import)"
   echo " 6) Generate FluxCP config (/config)"
   echo " 7) Patch FluxCP ServerDetails.php"
-  echo " 8) Exit"
+  echo " 8) Import SQL files (sql-files -> DBs)"
+  echo " 9) Exit"
   echo "===================================================="
-  read -rp "Choose an option [1-8]: " choice
+  read -rp "Choose an option [1-9]: " choice
+
 
   case "$choice" in
     1) full_install ;;
-    2) run_phase "Clean previous install"       phase_clean_all ;;
-    3) run_phase "Regenerate DB password"       phase_regenerate_db_password ;;
-    4) run_phase "Recompile rAthena"            phase_compile_rathena ;;
-    5) run_phase "Generate rAthena config"      phase_generate_rathena_config ;;
-    6) run_phase "Generate FluxCP config"       phase_generate_fluxcp_config ;;
+    2) run_phase "Clean previous install"         phase_clean_all ;;
+    3) run_phase "Regenerate DB password"         phase_regenerate_db_password ;;
+    4) run_phase "Recompile rAthena"              phase_compile_rathena ;;
+    5) run_phase "Generate rAthena config"        phase_generate_rathena_config ;;
+    6) run_phase "Generate FluxCP config"         phase_generate_fluxcp_config ;;
     7) run_phase "Patch FluxCP ServerDetails.php" phase_patch_fluxcp_serverdetails_php ;;
-    8) echo "Exiting."; exit 0 ;;
+    8) run_phase "Import SQL files"               phase_import_sqls ;;
+    9) echo "Exiting."; exit 0 ;;
     *) echo "Invalid choice."; read -rp "Press Enter to continue..." _ ;;
   esac
+
 done
