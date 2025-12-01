@@ -534,95 +534,63 @@ phase_validate_rathena_setup(){
     return 0
 }
 
-phase_generate_fluxcp_config() {
-    log "Patching FluxCP application.php and server.php..."
+phase_generate_fluxcp_config(){
+    log "Patching FluxCP application.php and servers.php..."
 
     mkdir -p "$WEBROOT/application/config"
     APPFILE="$WEBROOT/application/config/application.php"
-    SRVFILE="$WEBROOT/application/config/server.php"
+    SRVFILE="$WEBROOT/application/config/servers.php"   # ✅ corrected
 
-    # ---- 1) Ensure real config files exist (copy .dist if present) ----
-    if [ ! -f "$APPFILE" ]; then
-        if [ -f "${APPFILE}.dist" ]; then
-            cp "${APPFILE}.dist" "$APPFILE"
-        else
-            echo "<?php return [];" > "$APPFILE"
-        fi
-    fi
+    # If real config doesn't exist, copy from .dist if available
+    [ ! -f "$APPFILE" ] && [ -f "${APPFILE}.dist" ] && cp "${APPFILE}.dist" "$APPFILE"
+    [ ! -f "$SRVFILE" ] && [ -f "${SRVFILE}.dist" ] && cp "${SRVFILE}.dist" "$SRVFILE"
 
-    if [ ! -f "$SRVFILE" ]; then
-        if [ -f "${SRVFILE}.dist" ]; then
-            cp "${SRVFILE}.dist" "$SRVFILE"
-        else
-            echo "<?php return [];" > "$SRVFILE"
-        fi
-    fi
+    # Safety fallback if still missing
+    [ ! -f "$APPFILE" ] && echo "<?php return array();" > "$APPFILE"
+    [ ! -f "$SRVFILE" ] && echo "<?php return array();" > "$SRVFILE"
 
-    # helper: set or insert a TOP-LEVEL key in a return array
-    set_top_key () {
-        local file="$1" key="$2" val="$3"
-        perl -0777 -i -pe '
-            my ($k,$v)=@ARGV; 
-            s/([\"\x27]\Q$k\E[\"\x27]\s*=>\s*)([\"\x27]).*?\2/$1$2$v$2/g
-            or
-            s/return\s*(array\s*\(|\[)(.*?)(\)\s*;|\]\s*;)/"return $1$2\n  \x27$k\x27 => \x27$v\x27,\n$3"/se
-        ' "$key" "$val" "$file"
-    }
+    # ---------------- application.php patches ----------------
+    sed -i -E "s|('BaseURI'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'/'|g" "$APPFILE"
+    sed -i -E "s|('InstallerPassword'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'RyomaHostingPH'|g" "$APPFILE"
+    sed -i -E "s|('SiteTitle'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'Ragnarok Control Panel'|g" "$APPFILE"
+    sed -i -E "s|('DonationCurrency'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'PHP'|g" "$APPFILE"
 
-    # helper: patch a nested config block (array() or [])
-    patch_db_block () {
-        local file="$1" block="$2" host="$3" user="$4" pass="$5" db="$6" convert="$7"
+    # ---------------- servers.php patches ----------------
+    sed -i -E "s|('ServerName'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'RagnaROK'|g" "$SRVFILE"
 
-        perl -0777 -i -pe '
-            my ($block,$host,$user,$pass,$db,$convert)=@ARGV;
+    # DbConfig block
+    sed -i -E "/'DbConfig'[[:space:]]*=>[[:space:]]*array\(/,/^[[:space:]]*\),/ {
+        s|('Hostname'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'127.0.0.1'|g
+        s|('Username'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_USER}'|g
+        s|('Password'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_PASS}'|g
+        s|('Database'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_RAGNAROK}'|g
+        s|('Convert'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'utf8'|g
+    }" "$SRVFILE"
 
-            # find block: "BlockName" => array(...) OR [...]
-            if (s/
-                ([\"\x27]\Q$block\E[\"\x27]\s*=>\s*)(array\s*\(|\[)
-                (.*?)
-                (\)\s*,|\]\s*,)
-            /
-                my $pre=$1; my $open=$2; my $body=$3; my $close=$4;
+    # LogsDbConfig block
+    sed -i -E "/'LogsDbConfig'[[:space:]]*=>[[:space:]]*array\(/,/^[[:space:]]*\),/ {
+        s|('Hostname'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'127.0.0.1'|g
+        s|('Username'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_USER}'|g
+        s|('Password'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_PASS}'|g
+        s|('Database'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_LOGS}'|g
+        s|('Convert'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'utf8'|g
+    }" "$SRVFILE"
 
-                sub setk {
-                    my ($b,$k,$v)=@_;
-                    if ($b =~ s/([\"\x27]\Q$k\E[\"\x27]\s*=>\s*)([\"\x27]).*?\2/$1$2$v$2/s) {
-                        return $b;
-                    } else {
-                        return $b . \"\\n    \x27$k\x27 => \x27$v\x27,\";
-                    }
-                }
-
-                $body = setk($body, \"Hostname\", $host) if length $host;
-                $body = setk($body, \"Convert\",  $convert) if length $convert;
-                $body = setk($body, \"Username\", $user) if length $user;
-                $body = setk($body, \"Password\", $pass) if length $pass;
-                $body = setk($body, \"Database\", $db) if length $db;
-
-                \"$pre$open$body\\n  $close\"
-            /sexg) { }
-        ' "$block" "$host" "$user" "$pass" "$db" "$convert" "$file"
-    }
-
-    # ---- 2) application.php patches (replace OR insert) ----
-    set_top_key "$APPFILE" "BaseURI" "/"
-    set_top_key "$APPFILE" "InstallerPassword" "RyomaHostingPH"
-    set_top_key "$APPFILE" "SiteTitle" "Ragnarok Control Panel"
-    set_top_key "$APPFILE" "DonationCurrency" "PHP"
-
-    # ---- 3) server.php patches ----
-    set_top_key "$SRVFILE" "ServerName" "RagnaROK"
-
-    patch_db_block "$SRVFILE" "DbConfig"     "127.0.0.1" "$DB_USER" "$DB_PASS" "$DB_RAGNAROK" "utf8"
-    patch_db_block "$SRVFILE" "LogsDbConfig" ""          "$DB_USER" "$DB_PASS" "$DB_LOGS"     "utf8"
-    patch_db_block "$SRVFILE" "WebDbConfig"  "127.0.0.1" "$DB_USER" "$DB_PASS" "$DB_FLUXCP"   ""
+    # WebDbConfig block
+    sed -i -E "/'WebDbConfig'[[:space:]]*=>[[:space:]]*array\(/,/^[[:space:]]*\),/ {
+        s|('Hostname'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'127.0.0.1'|g
+        s|('Username'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_USER}'|g
+        s|('Password'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_PASS}'|g
+        s|('Database'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_FLUXCP}'|g
+    }" "$SRVFILE"
 
     chown -R www-data:www-data "$WEBROOT"
     usermod -a -G www-data "$RATHENA_USER" 2>/dev/null || true
     chmod -R 0774 "$WEBROOT"
 
-    log "FluxCP application.php and server.php patched."
+    log "FluxCP application.php and servers.php patched."
 }
+
 
 
 phase_create_serverdetails(){
