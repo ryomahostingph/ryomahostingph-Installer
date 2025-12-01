@@ -497,6 +497,63 @@ phase_import_sqls(){
     fi
 }
 
+# ================== NEW: SYNC SERVER ACCOUNT INTO DB ==================
+phase_sync_server_account_db(){
+    log "Syncing inter-server USERID/USERPASS into login server account (sex='S')..."
+
+    [ -n "${USERID:-}" ]   || { log "USERID empty, cannot sync server account"; return 1; }
+    [ -n "${USERPASS:-}" ] || { log "USERPASS empty, cannot sync server account"; return 1; }
+
+    # Detect if login-server expects MD5 passwords (default yes)
+    local LOGIN_CONF="${RATHENA_INSTALL_DIR}/conf/import/login_conf.txt"
+    local USE_MD5="yes"
+    if [ -f "$LOGIN_CONF" ]; then
+        USE_MD5="$(grep -Ei '^[[:space:]]*use_md5_passwd[[:space:]]*:' "$LOGIN_CONF" \
+                   | awk -F: '{gsub(/[[:space:]]/,"",$2); print tolower($2)}' \
+                   | tail -n1)"
+        [ -z "$USE_MD5" ] && USE_MD5="yes"
+    fi
+
+    local DB_PASS_VALUE="$USERPASS"
+    if [ "$USE_MD5" = "yes" ] || [ "$USE_MD5" = "true" ]; then
+        DB_PASS_VALUE="$(printf "%s" "$USERPASS" | md5sum | awk '{print $1}')"
+        log "use_md5_passwd=yes → storing MD5 hash in DB."
+    else
+        log "use_md5_passwd=no → storing plaintext in DB."
+    fi
+
+    # Update existing server account (account_id=1 or sex='S')
+    mariadb -u"$DB_USER" -p"$DB_PASS" "$DB_RAGNAROK" <<SQL >>"$LOGFILE" 2>&1
+UPDATE login
+SET userid='${USERID}',
+    user_pass='${DB_PASS_VALUE}',
+    sex='S',
+    email='athena@athena.com'
+WHERE account_id=1 OR sex='S'
+LIMIT 1;
+SQL
+
+    # If none exists, insert it
+    local updated
+    updated="$(mariadb -u"$DB_USER" -p"$DB_PASS" -N -s "$DB_RAGNAROK" \
+              -e "SELECT COUNT(*) FROM login WHERE userid='${USERID}' AND sex='S' LIMIT 1;" 2>/dev/null || echo 0)"
+
+    if [ "${updated:-0}" -eq 0 ]; then
+        log "Server account not found, inserting new sex='S' account..."
+        mariadb -u"$DB_USER" -p"$DB_PASS" "$DB_RAGNAROK" <<SQL >>"$LOGFILE" 2>&1
+INSERT INTO login (account_id, userid, user_pass, sex, email, group_id, state)
+VALUES (1, '${USERID}', '${DB_PASS_VALUE}', 'S', 'athena@athena.com', 0, 0)
+ON DUPLICATE KEY UPDATE
+    userid='${USERID}',
+    user_pass='${DB_PASS_VALUE}',
+    sex='S',
+    email='athena@athena.com';
+SQL
+    fi
+
+    log "Server account in DB now matches USERID/USERPASS."
+}
+
 # ---------- validation helper ----------
 validate_rathena_imports() {
     local import_dir="$1"
@@ -900,13 +957,17 @@ full_install(){
     run_phase "Configure phpMyAdmin"           phase_configure_phpmyadmin     || { log "Full installer aborted."; return 1; }
     run_phase "Clone rAthena and FluxCP"       phase_clone_repos              || { log "Full installer aborted."; return 1; }
     run_phase "Setup MariaDB & credentials"    phase_setup_mariadb            || { log "Full installer aborted."; return 1; }
+
+    # IMPORTANT ORDER:
+    run_phase "Generate rAthena config"        phase_generate_rathena_config  || { log "Full installer aborted."; return 1; }
     run_phase "Import SQL files"               phase_import_sqls              || { log "Full installer aborted."; return 1; }
+    run_phase "Sync Server Account in DB"      phase_sync_server_account_db   || { log "Full installer aborted."; return 1; }
+
     run_phase "Generate FluxCP config"         phase_generate_fluxcp_config   || { log "Full installer aborted."; return 1; }
     run_phase "Patch FluxCP ServerDetails.php" phase_patch_fluxcp_serverdetails_php || { log "Full installer aborted."; return 1; }
     run_phase "Compile rAthena"                phase_compile_rathena          || { log "Full installer aborted."; return 1; }
     run_phase "Create ServerDetails.txt"       phase_create_serverdetails     || { log "Full installer aborted."; return 1; }
     run_phase "Create desktop shortcuts"       phase_create_desktop_shortcuts || { log "Full installer aborted."; return 1; }
-    run_phase "Generate rAthena config"        phase_generate_rathena_config  || { log "Full installer aborted."; return 1; }
     run_phase "Validate rAthena setup"         phase_validate_rathena_setup   || { log "Full installer aborted."; return 1; }
 
     log "Full installer finished successfully."
