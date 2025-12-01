@@ -624,8 +624,6 @@ phase_generate_fluxcp_config(){
         ),\\
 " "$SRVFILE"
     fi
-}
-
 
     # ---- Post-patch validation (fail phase if missed) ----
     grep -q "'BaseURI'[[:space:]]*=>[[:space:]]*'/'" "$APPFILE" || { log "ERROR: BaseURI patch failed"; return 1; }
@@ -639,6 +637,7 @@ phase_generate_fluxcp_config(){
 
     log "FluxCP config patched successfully in $FLUX_CFG_DIR"
 }
+
 
 # NEW: Patch FluxCP ServerDetails.php with DB creds
 phase_patch_fluxcp_serverdetails_php() {
