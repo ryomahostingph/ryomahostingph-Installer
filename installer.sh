@@ -356,21 +356,51 @@ cmake --build build -j\$(nproc)
 }
 
 phase_import_sqls(){
-    log "Importing SQL files..."
-    local SQL_DIRS=("$RATHENA_INSTALL_DIR/sql" "$RATHENA_HOME/sql_imports")
-    for dir in "${SQL_DIRS[@]}"; do
-        [ -d "$dir" ] || continue
-        for f in "$dir"/*.sql; do
-            [ -e "$f" ] || continue
-            case "$(basename "$f")" in
-                main.sql) mariadb "$DB_RAGNAROK" < "$f" && log "Imported main.sql" ;;
-                logs.sql) mariadb "$DB_LOGS" < "$f" && log "Imported logs.sql" ;;
-                *)        mariadb "$DB_RAGNAROK" < "$f" && log "Imported $(basename "$f")" ;;
-            esac
-        done
+    log "Importing SQL files from sql-files..."
+
+    # ✅ use installer variable, not a hard-coded path
+    local SQL_DIR="${RATHENA_INSTALL_DIR}/sql-files"
+
+    if [ ! -d "$SQL_DIR" ]; then
+        log "ERROR: SQL directory not found: $SQL_DIR"
+        echo "SQL directory not found at: $SQL_DIR"
+        return 1
+    fi
+
+    mapfile -t sql_files < <(find "$SQL_DIR" -maxdepth 1 -type f -name "*.sql" | sort)
+    if [ ${#sql_files[@]} -eq 0 ]; then
+        log "WARNING: No .sql files found in $SQL_DIR"
+        echo "No .sql files found in $SQL_DIR"
+        return 0
+    fi
+
+    import_sql(){
+        local db="$1"
+        local file="$2"
+        log "Importing $(basename "$file") into $db ..."
+        mariadb -u"$DB_USER" -p"$DB_PASS" "$db" < "$file" >>"$LOGFILE" 2>&1
+    }
+
+    local ok=1
+    for f in "${sql_files[@]}"; do
+        case "$(basename "$f")" in
+            main.sql) import_sql "$DB_RAGNAROK" "$f" || ok=0 ;;
+            logs.sql) import_sql "$DB_LOGS"     "$f" || ok=0 ;;
+            *)        import_sql "$DB_RAGNAROK" "$f" || ok=0 ;;
+        esac
     done
-    log "SQL import completed."
+
+    if [ $ok -eq 1 ]; then
+        log "SQL import completed successfully."
+        echo "SQL import completed successfully."
+        return 0
+    else
+        log "ERROR: One or more SQL imports failed. Check $LOGFILE."
+        echo "One or more SQL imports failed. Check $LOGFILE."
+        return 1
+    fi
 }
+
 
 # ---------- validation helper ----------
 validate_rathena_imports() {
