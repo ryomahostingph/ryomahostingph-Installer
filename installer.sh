@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# rAthena auto-installer with interactive menu, spinner, strict phase error handling,
+# and post-compile config + validation.
 set -uo pipefail
 
 # ================== VARIABLES ==================
@@ -53,15 +55,19 @@ spinner() {
     fi
 }
 
-# ================== LOAD / GENERATE DB CREDENTIALS ==================
+# ================== LOAD / GENERATE CREDENTIALS ==================
 if [ -f "$CRED_FILE" ]; then
-    log "Loading existing DB credentials from $CRED_FILE"
+    log "Loading existing credentials from $CRED_FILE"
     # shellcheck source=/dev/null
-    source "$CRED_FILE"
+    source "$CRED_FILE" || true
 else
-    log "No existing DB credentials found. Generating new password..."
-    DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || true)"
+    log "No existing DB credentials found. Generating new DB password..."
+    DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || echo 'ChangeMe123')"
 fi
+
+# Ensure USERID/USERPASS defined even if CRED_FILE didn't contain them
+USERID="${USERID:-}"
+USERPASS="${USERPASS:-}"
 
 # ================== PHASE WRAPPER (ERROR HANDLING) ==================
 run_phase() {
@@ -90,7 +96,7 @@ run_phase() {
         fi
         echo
         read -rp "Press Enter to return to the menu..." _
-        return $rc
+        return $rc   # ⬅️ prevents next phase from running
     fi
 
     log "=== Completed: ${label} ==="
@@ -139,7 +145,7 @@ phase_create_rathena_user(){
              "${RATHENA_HOME}/sql_imports" "${RATHENA_HOME}/db_backups"
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_HOME"
 
-    # Create server scripts (start/stop/restart)
+    # Server control scripts
     cat > "${RATHENA_HOME}/start_servers_xfce.sh" <<'BASH'
 #!/usr/bin/env bash
 set -e
@@ -172,7 +178,7 @@ BASH
     chmod +x "${RATHENA_HOME}/restart_servers_xfce.sh"
     chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/restart_servers_xfce.sh"
 
-    # Enable VNC if template unit exists
+    # Enable VNC template if present
     if systemctl list-unit-files 2>/dev/null | grep -q '^vncserver@'; then
         systemctl enable --now vncserver@1.service 2>/dev/null || true
     fi
@@ -182,7 +188,7 @@ BASH
 
 phase_configure_phpmyadmin(){
     log "Configuring phpMyAdmin..."
-    # Enable PHP module (Debian 12)
+    # Enable PHP module (Debian 12 default)
     if [ -f /etc/apache2/mods-available/php8.2.load ]; then
         a2enmod php8.2
     fi
@@ -247,6 +253,8 @@ DB_PASS='${DB_PASS}'
 DB_RAGNAROK='${DB_RAGNAROK}'
 DB_LOGS='${DB_LOGS}'
 DB_FLUXCP='${DB_FLUXCP}'
+USERID='${USERID}'
+USERPASS='${USERPASS}'
 EOF
     chmod 600 "$CRED_FILE"
     log "MariaDB setup complete and credentials saved to $CRED_FILE"
@@ -422,7 +430,7 @@ phase_generate_rathena_config(){
     local inter_conf="$import_dir/inter_conf.txt"
     local db_conf="$import_dir/rathena_db.conf"
 
-    # Reuse existing USERID/USERPASS from char_conf if present
+    # Reuse existing USERID/USERPASS from char_conf if present and not already set
     if [ -z "$USERID" ] && [ -f "$char_conf" ]; then
         USERID="$(sed -n 's/^userid:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
         USERPASS="$(sed -n 's/^passwd:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
@@ -477,6 +485,18 @@ EOF
 
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$import_dir"
     log "rAthena import config generated."
+
+    # Persist USERID/USERPASS to CRED_FILE for reuse
+    cat > "$CRED_FILE" <<EOF
+DB_USER='${DB_USER}'
+DB_PASS='${DB_PASS}'
+DB_RAGNAROK='${DB_RAGNAROK}'
+DB_LOGS='${DB_LOGS}'
+DB_FLUXCP='${DB_FLUXCP}'
+USERID='${USERID}'
+USERPASS='${USERPASS}'
+EOF
+    chmod 600 "$CRED_FILE"
 
     validate_rathena_imports "$import_dir"
 }
@@ -559,7 +579,7 @@ phase_generate_fluxcp_config(){
     }" "$SRVFILE"
 
     chown -R www-data:www-data "$WEBROOT"
-    usermod -a -G www-data "$RATHENA_USER"
+    usermod -a -G www-data "$RATHENA_USER" 2>/dev/null || true
     chmod -R 0774 "$WEBROOT"
 
     log "FluxCP application.php and server.php patched."
@@ -685,20 +705,30 @@ phase_clean_all(){
 
     rm -f "$CRED_FILE"
 
-    mariadb <<SQL
+    if cmd_exists mariadb; then
+        mariadb <<SQL
 DROP DATABASE IF EXISTS ${DB_RAGNAROK};
 DROP DATABASE IF EXISTS ${DB_LOGS};
 DROP DATABASE IF EXISTS ${DB_FLUXCP};
 DROP USER IF EXISTS '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 SQL
+    else
+        log "MariaDB not installed or not found; skipping DB drop."
+    fi
 
     log "Clean complete. All rAthena files, databases, and user credentials removed."
 }
 
 phase_regenerate_db_password(){
+    if ! cmd_exists mariadb; then
+        log "MariaDB client not found; cannot regenerate DB password."
+        echo "MariaDB client not found; install MariaDB first."
+        return 1
+    fi
+
     log "Regenerating DB password..."
-    DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || true)"
+    DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || echo 'ChangeMe123')"
     mariadb <<SQL
 ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
 FLUSH PRIVILEGES;
@@ -709,6 +739,8 @@ DB_PASS='${DB_PASS}'
 DB_RAGNAROK='${DB_RAGNAROK}'
 DB_LOGS='${DB_LOGS}'
 DB_FLUXCP='${DB_FLUXCP}'
+USERID='${USERID}'
+USERPASS='${USERPASS}'
 EOF
     chmod 600 "$CRED_FILE"
     log "DB password regenerated: ${DB_PASS}"
@@ -718,19 +750,22 @@ EOF
 full_install(){
     log "Starting full installer..."
 
-    run_phase "System update & upgrade"        phase_update_upgrade       || { log "Full installer aborted."; return 1; }
-    run_phase "Install base packages"         phase_install_packages     || { log "Full installer aborted."; return 1; }
-    run_phase "Install Chrome/Chromium"       phase_install_chrome       || { log "Full installer aborted."; return 1; }
-    run_phase "Create rAthena user"           phase_create_rathena_user  || { log "Full installer aborted."; return 1; }
-    run_phase "Configure phpMyAdmin"          phase_configure_phpmyadmin || { log "Full installer aborted."; return 1; }
-    run_phase "Clone rAthena and FluxCP"      phase_clone_repos          || { log "Full installer aborted."; return 1; }
-    run_phase "Setup MariaDB & credentials"   phase_setup_mariadb        || { log "Full installer aborted."; return 1; }
-    run_phase "Import SQL files"              phase_import_sqls          || { log "Full installer aborted."; return 1; }
+    run_phase "System update & upgrade"        phase_update_upgrade         || { log "Full installer aborted."; return 1; }
+    run_phase "Install base packages"         phase_install_packages       || { log "Full installer aborted."; return 1; }
+    run_phase "Install Chrome/Chromium"       phase_install_chrome         || { log "Full installer aborted."; return 1; }
+    run_phase "Create rAthena user"           phase_create_rathena_user    || { log "Full installer aborted."; return 1; }
+    run_phase "Configure phpMyAdmin"          phase_configure_phpmyadmin   || { log "Full installer aborted."; return 1; }
+    run_phase "Clone rAthena and FluxCP"      phase_clone_repos            || { log "Full installer aborted."; return 1; }
+    run_phase "Setup MariaDB & credentials"   phase_setup_mariadb          || { log "Full installer aborted."; return 1; }
+    run_phase "Import SQL files"              phase_import_sqls            || { log "Full installer aborted."; return 1; }
     run_phase "Generate FluxCP config"        phase_generate_fluxcp_config || { log "Full installer aborted."; return 1; }
+
+    # ⬇️ Your requirement: compile first, then configs
+    run_phase "Compile rAthena"               phase_compile_rathena        || { log "Full installer aborted."; return 1; }
     run_phase "Generate rAthena config"       phase_generate_rathena_config || { log "Full installer aborted."; return 1; }
-    run_phase "Compile rAthena"               phase_compile_rathena      || { log "Full installer aborted."; return 1; }
     run_phase "Validate rAthena setup"        phase_validate_rathena_setup || { log "Full installer aborted."; return 1; }
-    run_phase "Create ServerDetails.txt"      phase_create_serverdetails || { log "Full installer aborted."; return 1; }
+
+    run_phase "Create ServerDetails.txt"      phase_create_serverdetails   || { log "Full installer aborted."; return 1; }
     run_phase "Create desktop shortcuts"      phase_create_desktop_shortcuts || { log "Full installer aborted."; return 1; }
 
     log "Full installer finished successfully."
