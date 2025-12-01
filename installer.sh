@@ -42,6 +42,21 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
 apt_install(){ apt install -y --no-install-recommends "$@"; }
 
+# ================== CREDENTIAL SAVE HELPER ==================
+save_creds() {
+    cat > "$CRED_FILE" <<EOF
+DB_USER='${DB_USER}'
+DB_PASS='${DB_PASS}'
+DB_RAGNAROK='${DB_RAGNAROK}'
+DB_LOGS='${DB_LOGS}'
+DB_FLUXCP='${DB_FLUXCP}'
+USERID='${USERID}'
+USERPASS='${USERPASS}'
+EOF
+    chmod 600 "$CRED_FILE"
+    log "Credentials saved to $CRED_FILE"
+}
+
 # ================== SIMPLE SPINNER ==================
 spinner() {
     local pid="$1"
@@ -153,6 +168,7 @@ phase_create_rathena_user(){
     if ! id "$RATHENA_USER" &>/dev/null; then
         useradd -m -s /bin/bash "$RATHENA_USER"
         echo "${RATHENA_USER}:${DEFAULT_VNC_PASSWORD}" | chpasswd
+        log "Default VNC password set to ${DEFAULT_VNC_PASSWORD} for user ${RATHENA_USER}"
     fi
 
     mkdir -p "${RATHENA_HOME}/Desktop" "${RATHENA_HOME}/.config/autostart" \
@@ -274,17 +290,8 @@ GRANT ALL PRIVILEGES ON ${DB_FLUXCP}.* TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 SQL
 
-    cat > "$CRED_FILE" <<EOF
-DB_USER='${DB_USER}'
-DB_PASS='${DB_PASS}'
-DB_RAGNAROK='${DB_RAGNAROK}'
-DB_LOGS='${DB_LOGS}'
-DB_FLUXCP='${DB_FLUXCP}'
-USERID='${USERID}'
-USERPASS='${USERPASS}'
-EOF
-    chmod 600 "$CRED_FILE"
-    log "MariaDB setup complete and credentials saved to $CRED_FILE"
+    save_creds
+    log "MariaDB setup complete."
 }
 
 phase_compile_rathena() {
@@ -410,8 +417,13 @@ phase_generate_rathena_config(){
         USERPASS="$(sed -n 's/^passwd:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
     fi
 
-    [ -z "$USERID" ]   && USERID="$(tr -dc 'A-Za-z' </dev/urandom | head -c6 || echo s1)"
-    [ -z "$USERPASS" ] && USERPASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8 || echo p1)"
+    if [ -n "$USERID" ] && [ -n "$USERPASS" ]; then
+        log "Reusing existing server-to-server credentials from $CRED_FILE"
+    else
+        [ -z "$USERID" ]   && USERID="$(tr -dc 'A-Za-z' </dev/urandom | head -c6 || echo s1)"
+        [ -z "$USERPASS" ] && USERPASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8 || echo p1)"
+        log "Generated new server-to-server credentials"
+    fi
 
     local SERVER_IP
     SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -449,17 +461,7 @@ EOF
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$import_dir"
     log "rAthena import config generated."
 
-    cat > "$CRED_FILE" <<EOF
-DB_USER='${DB_USER}'
-DB_PASS='${DB_PASS}'
-DB_RAGNAROK='${DB_RAGNAROK}'
-DB_LOGS='${DB_LOGS}'
-DB_FLUXCP='${DB_FLUXCP}'
-USERID='${USERID}'
-USERPASS='${USERPASS}'
-EOF
-    chmod 600 "$CRED_FILE"
-
+    save_creds
     validate_rathena_imports "$import_dir"
 }
 
@@ -547,6 +549,41 @@ phase_generate_fluxcp_config(){
     chmod -R 0774 "$WEBROOT"
 
     log "FluxCP config patched successfully in $FLUX_CFG_DIR"
+}
+
+# NEW: Patch FluxCP ServerDetails.php with DB creds
+phase_patch_fluxcp_serverdetails_php() {
+    log "Patching FluxCP ServerDetails.php with DB credentials..."
+
+    local DETAILS_PHP="${WEBROOT}/ServerDetails.php"
+
+    # If file doesn't exist, create a minimal one
+    if [ ! -f "$DETAILS_PHP" ]; then
+        cat > "$DETAILS_PHP" <<'PHP'
+<?php
+return array(
+    'DbHost' => '127.0.0.1',
+    'DbUser' => '',
+    'DbPass' => '',
+    'DbName' => '',
+    'LogsDbName' => '',
+    'WebDbName' => '',
+);
+PHP
+        log "Created new ServerDetails.php"
+    fi
+
+    sed -i -E "s|('DbHost'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'127.0.0.1'|g" "$DETAILS_PHP"
+    sed -i -E "s|('DbUser'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_USER}'|g" "$DETAILS_PHP"
+    sed -i -E "s|('DbPass'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_PASS}'|g" "$DETAILS_PHP"
+    sed -i -E "s|('DbName'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_RAGNAROK}'|g" "$DETAILS_PHP"
+    sed -i -E "s|('LogsDbName'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_LOGS}'|g" "$DETAILS_PHP"
+    sed -i -E "s|('WebDbName'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_FLUXCP}'|g" "$DETAILS_PHP"
+
+    grep -q "${DB_USER}" "$DETAILS_PHP" || { log "ERROR: ServerDetails.php patch failed"; return 1; }
+
+    chown www-data:www-data "$DETAILS_PHP"
+    log "ServerDetails.php patched successfully."
 }
 
 phase_create_serverdetails(){
@@ -650,7 +687,7 @@ EOF
 
 # ================== CLEAN & DB PASSWORD PHASES ==================
 phase_clean_all(){
-    log "Cleaning previous rAthena installation completely..."
+    log "Cleaning previous rAthena installation completely (SAFE CLEAN: credentials kept)..."
 
     systemctl stop vncserver@1.service 2>/dev/null || true
     systemctl stop apache2 mariadb 2>/dev/null || true
@@ -668,7 +705,8 @@ phase_clean_all(){
     rm -rf "$RATHENA_HOME/.config/autostart"
     rm -rf "$RATHENA_HOME/.vnc"
 
-    rm -f "$CRED_FILE"
+    # SAFE CLEAN: DO NOT remove $CRED_FILE
+    log "Safe clean enabled: keeping credentials at $CRED_FILE"
 
     if cmd_exists mariadb; then
         mariadb <<SQL >>"$LOGFILE" 2>&1
@@ -682,7 +720,7 @@ SQL
         log "MariaDB not installed or not found; skipping DB drop."
     fi
 
-    log "Clean complete. All rAthena files, databases, and user credentials removed."
+    log "Clean complete. All rAthena files, databases, and configs removed (credentials preserved)."
 }
 
 phase_regenerate_db_password(){
@@ -699,16 +737,7 @@ ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
 FLUSH PRIVILEGES;
 SQL
 
-    cat > "$CRED_FILE" <<EOF
-DB_USER='${DB_USER}'
-DB_PASS='${DB_PASS}'
-DB_RAGNAROK='${DB_RAGNAROK}'
-DB_LOGS='${DB_LOGS}'
-DB_FLUXCP='${DB_FLUXCP}'
-USERID='${USERID}'
-USERPASS='${USERPASS}'
-EOF
-    chmod 600 "$CRED_FILE"
+    save_creds
     log "DB password regenerated."
 }
 
@@ -716,22 +745,23 @@ EOF
 full_install(){
     log "Starting full installer..."
 
-    run_phase "System update & upgrade"        phase_update_upgrade          || { log "Full installer aborted."; return 1; }
-    run_phase "Install base packages"          phase_install_packages        || { log "Full installer aborted."; return 1; }
-    run_phase "Install Chrome/Chromium"        phase_install_chrome          || { log "Full installer aborted."; return 1; }
-    run_phase "Create rAthena user"            phase_create_rathena_user     || { log "Full installer aborted."; return 1; }
-    run_phase "Configure phpMyAdmin"           phase_configure_phpmyadmin    || { log "Full installer aborted."; return 1; }
-    run_phase "Clone rAthena and FluxCP"       phase_clone_repos             || { log "Full installer aborted."; return 1; }
-    run_phase "Setup MariaDB & credentials"    phase_setup_mariadb           || { log "Full installer aborted."; return 1; }
-    run_phase "Import SQL files"               phase_import_sqls             || { log "Full installer aborted."; return 1; }
-    run_phase "Generate FluxCP config"         phase_generate_fluxcp_config  || { log "Full installer aborted."; return 1; }
+    run_phase "System update & upgrade"        phase_update_upgrade           || { log "Full installer aborted."; return 1; }
+    run_phase "Install base packages"          phase_install_packages         || { log "Full installer aborted."; return 1; }
+    run_phase "Install Chrome/Chromium"        phase_install_chrome           || { log "Full installer aborted."; return 1; }
+    run_phase "Create rAthena user"            phase_create_rathena_user      || { log "Full installer aborted."; return 1; }
+    run_phase "Configure phpMyAdmin"           phase_configure_phpmyadmin     || { log "Full installer aborted."; return 1; }
+    run_phase "Clone rAthena and FluxCP"       phase_clone_repos              || { log "Full installer aborted."; return 1; }
+    run_phase "Setup MariaDB & credentials"    phase_setup_mariadb            || { log "Full installer aborted."; return 1; }
+    run_phase "Import SQL files"               phase_import_sqls              || { log "Full installer aborted."; return 1; }
+    run_phase "Generate FluxCP config"         phase_generate_fluxcp_config   || { log "Full installer aborted."; return 1; }
+    run_phase "Patch FluxCP ServerDetails.php" phase_patch_fluxcp_serverdetails_php || { log "Full installer aborted."; return 1; }
 
-    run_phase "Compile rAthena"                phase_compile_rathena         || { log "Full installer aborted."; return 1; }
-    run_phase "Generate rAthena config"        phase_generate_rathena_config || { log "Full installer aborted."; return 1; }
-    run_phase "Validate rAthena setup"         phase_validate_rathena_setup  || { log "Full installer aborted."; return 1; }
+    run_phase "Compile rAthena"                phase_compile_rathena          || { log "Full installer aborted."; return 1; }
+    run_phase "Generate rAthena config"        phase_generate_rathena_config  || { log "Full installer aborted."; return 1; }
+    run_phase "Validate rAthena setup"         phase_validate_rathena_setup   || { log "Full installer aborted."; return 1; }
 
-    run_phase "Create ServerDetails.txt"       phase_create_serverdetails    || { log "Full installer aborted."; return 1; }
-    run_phase "Create desktop shortcuts"       phase_create_desktop_shortcuts|| { log "Full installer aborted."; return 1; }
+    run_phase "Create ServerDetails.txt"       phase_create_serverdetails     || { log "Full installer aborted."; return 1; }
+    run_phase "Create desktop shortcuts"       phase_create_desktop_shortcuts || { log "Full installer aborted."; return 1; }
 
     log "Full installer finished successfully."
     echo
@@ -750,23 +780,25 @@ while true; do
   clear
   echo "================ rAthena Installer ================="
   echo " 1) Run full installer"
-  echo " 2) Clean previous install (files + DBs + DB user)"
+  echo " 2) Clean previous install (files + DBs + DB user) [SAFE CLEAN]"
   echo " 3) Regenerate rAthena DB password"
   echo " 4) Recompile rAthena server"
   echo " 5) Generate rAthena config (conf/import)"
-  echo " 6) Generate FluxCP config (/config)"   # ✅ corrected menu label
-  echo " 7) Exit"
+  echo " 6) Generate FluxCP config (/config)"
+  echo " 7) Patch FluxCP ServerDetails.php"
+  echo " 8) Exit"
   echo "===================================================="
-  read -rp "Choose an option [1-7]: " choice
+  read -rp "Choose an option [1-8]: " choice
 
   case "$choice" in
     1) full_install ;;
-    2) run_phase "Clean previous install" phase_clean_all ;;
-    3) run_phase "Regenerate DB password" phase_regenerate_db_password ;;
-    4) run_phase "Recompile rAthena"      phase_compile_rathena ;;
-    5) run_phase "Generate rAthena config" phase_generate_rathena_config ;;
-    6) run_phase "Generate FluxCP config"  phase_generate_fluxcp_config ;;
-    7) echo "Exiting."; exit 0 ;;
+    2) run_phase "Clean previous install"       phase_clean_all ;;
+    3) run_phase "Regenerate DB password"       phase_regenerate_db_password ;;
+    4) run_phase "Recompile rAthena"            phase_compile_rathena ;;
+    5) run_phase "Generate rAthena config"      phase_generate_rathena_config ;;
+    6) run_phase "Generate FluxCP config"       phase_generate_fluxcp_config ;;
+    7) run_phase "Patch FluxCP ServerDetails.php" phase_patch_fluxcp_serverdetails_php ;;
+    8) echo "Exiting."; exit 0 ;;
     *) echo "Invalid choice."; read -rp "Press Enter to continue..." _ ;;
   esac
 done
