@@ -498,19 +498,24 @@ map_ip: ${SERVER_IP}
 EOF
 
     cat > "$inter_conf" <<EOF
+login_server_id: ${DB_USER}
 login_server_pw: ${DB_PASS}
+login_server_db: ${DB_RAGNAROK}
+ipban_db_id: ${DB_USER}
 ipban_db_pw: ${DB_PASS}
+ipban_db_db: ${DB_RAGNAROK}
+char_server_id: ${DB_USER}
 char_server_pw: ${DB_PASS}
+char_server_db: ${DB_RAGNAROK}
+map_server_id: ${DB_USER}
 map_server_pw: ${DB_PASS}
-log_db_pw: ${DB_PASS}
+map_server_db: ${DB_RAGNAROK}
+web_server_id: ${DB_USER}
 web_server_pw: ${DB_PASS}
-login_server_db: ${DB_USER}
-ipban_db_db: ${DB_USER}
-char_server_db: ${DB_USER}
-map_server_db: ${DB_USER}
-web_server_db: ${DB_USER}
+web_server_db: ${DB_RAGNAROK}
+log_db_id: ${DB_USER}
+log_db_pw: ${DB_PASS}
 log_db_db: ${DB_LOGS}
-
 EOF
 
     cat > "$db_conf" <<EOF
