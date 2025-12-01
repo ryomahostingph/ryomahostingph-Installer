@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 
 # ================== VARIABLES ==================
 LOGFILE="/var/log/rathena_installer_final.log"
@@ -41,23 +41,20 @@ spinner() {
     local spin='-\|/'
     local i=0
 
-    # REMOVE THIS:
-    # if [ ! -t 1 ]; then
-    #     return 0
-    # fi
-
     while kill -0 "$pid" 2>/dev/null; do
         if [ -t 1 ]; then
-            printf "\r[%c] %s" "${spin:i++%4:1}" "$label"
+            printf "
+[%c] %s" "${spin:i++%4:1}" "$label"
         fi
         sleep 0.2
     done
 
     if [ -t 1 ]; then
-        printf "\r[✓] %s\n" "$label"
+        printf "
+[✓] %s
+" "$label"
     fi
 }
-
 
 # ================== LOAD / GENERATE DB CREDENTIALS ==================
 if [ -f "$CRED_FILE" ]; then
@@ -118,7 +115,7 @@ phase_update_upgrade(){
 
 phase_install_packages(){
     log "Installing base packages..."
-    apt_install build-essential git cmake autoconf libssl-dev \
+    apt_install sudo build-essential git cmake autoconf libssl-dev \
       libmariadb-dev-compat libmariadb-dev libpcre3-dev zlib1g-dev libxml2-dev \
       wget curl unzip apache2 php php-mysql php-gd php-xml php-mbstring \
       mariadb-server mariadb-client \
@@ -144,9 +141,53 @@ phase_create_rathena_user(){
         useradd -m -s /bin/bash "$RATHENA_USER"
         echo "${RATHENA_USER}:${DEFAULT_VNC_PASSWORD}" | chpasswd
     fi
+
     mkdir -p "${RATHENA_HOME}/Desktop" "${RATHENA_HOME}/.config/autostart" \
              "${RATHENA_HOME}/sql_imports" "${RATHENA_HOME}/db_backups"
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_HOME"
+
+    # create simple start/stop/restart server scripts for desktop shortcuts
+    cat > "${RATHENA_HOME}/start_servers_xfce.sh" <<'BASH'
+#!/usr/bin/env bash
+# Start rAthena servers (adjust paths and commands as needed)
+set -e
+RATHENA_HOME="/home/rathena"
+cd "$RATHENA_HOME/Desktop/rathena"
+# example: start login, char, map
+nohup ./login-server > /dev/null 2>&1 &
+nohup ./char-server > /dev/null 2>&1 &
+nohup ./map-server > /dev/null 2>&1 &
+BASH
+    chmod +x "${RATHENA_HOME}/start_servers_xfce.sh"
+    chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/start_servers_xfce.sh"
+
+    cat > "${RATHENA_HOME}/stop_servers_xfce.sh" <<'BASH'
+#!/usr/bin/env bash
+# Stop rAthena servers (simple pkill approach)
+pkill -f login-server || true
+pkill -f char-server || true
+pkill -f map-server || true
+BASH
+    chmod +x "${RATHENA_HOME}/stop_servers_xfce.sh"
+    chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/stop_servers_xfce.sh"
+
+    cat > "${RATHENA_HOME}/restart_servers_xfce.sh" <<'BASH'
+#!/usr/bin/env bash
+set -e
+"${HOME}/stop_servers_xfce.sh" || true
+sleep 1
+"${HOME}/start_servers_xfce.sh" || true
+BASH
+    # replace ${HOME} inside file with actual path
+    sed -i "s|\${HOME}|${RATHENA_HOME}|g" "${RATHENA_HOME}/restart_servers_xfce.sh"
+    chmod +x "${RATHENA_HOME}/restart_servers_xfce.sh"
+    chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/restart_servers_xfce.sh"
+
+    # enable vncserver service (if unit exists)
+    if systemctl list-unit-files | grep -q '^vncserver@'; then
+        systemctl enable --now vncserver@1.service 2>/dev/null || true
+    fi
+
     log "User ${RATHENA_USER} prepared."
 }
 
@@ -202,54 +243,36 @@ phase_compile_rathena() {
     fi
 
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$RATHENA_INSTALL_DIR"
-    cd "$RATHENA_INSTALL_DIR"
 
-    if [ -f "Makefile" ]; then
-        log "Detected Makefile – using make-based build."
-        echo "Using legacy make build system..."
-
-        {
-          make clean
-          make -j"$(nproc)"
-        } >>"$LOGFILE" 2>&1 || {
-          log "Compilation failed using make. See $LOGFILE for details."
-          echo
-          echo "rAthena compilation failed while running 'make'."
-          echo "Open ${LOGFILE} and search for 'error:' lines to see the exact compiler error."
-          return 1
-        }
-
-    elif [ -f "CMakeLists.txt" ]; then
-        log "No Makefile found – using CMake out-of-source build (build/ directory)."
-        echo "Using CMake build system (this can take a bit)."
-
-        # Clean previous build dir to avoid stale CMake cache/config
-        rm -rf build
-        mkdir -p build
-
-        {
-          echo ">>> [cmake configure]"
-          cmake -S . -B build
-
-          echo ">>> [cmake build]"
-          cmake --build build -j"$(nproc)"
-        } >>"$LOGFILE" 2>&1 || {
-          log "Compilation failed using CMake. See $LOGFILE for details."
-          echo
-          echo "rAthena compilation failed during the CMake build."
-          echo "Most common causes:"
-          echo "  - Missing dev libraries (zlib, OpenSSL, MariaDB headers, etc.)"
-          echo "  - Source code errors or incompatible options"
-          echo
-          echo "Check ${LOGFILE} and look right after the '[cmake build]' section for the exact error."
-          return 1
-        }
-
+    # Run the compile as the rathena user to avoid permission issues
+    if cmd_exists sudo; then
+        sudo -u "$RATHENA_USER" bash -lc "cd '$RATHENA_INSTALL_DIR' && \
+            if [ -f Makefile ]; then \
+                echo 'Using legacy make build system...' && make clean && make -j\$(nproc); \
+            elif [ -f CMakeLists.txt ]; then \
+                echo 'Using CMake build system...' && rm -rf build && mkdir -p build && cmake -S . -B build && cmake --build build -j\$(nproc); \
+            else \
+                echo 'No Makefile or CMakeLists.txt found' && exit 2; \
+            fi" >>"$LOGFILE" 2>&1 || {
+                log "Compilation failed. See $LOGFILE for details."
+                echo
+                echo "rAthena compilation failed. Check ${LOGFILE} for compiler output."
+                return 1
+            }
     else
-        log "Neither Makefile nor CMakeLists.txt found – cannot determine build system."
-        echo "Could not compile rAthena: no Makefile or CMakeLists.txt found in ${RATHENA_INSTALL_DIR}."
-        echo "Check that the rAthena repository cloned correctly and contains the expected files."
-        return 1
+        (cd "$RATHENA_INSTALL_DIR" && \
+            if [ -f Makefile ]; then \
+                echo 'Using legacy make build system...' && make clean && make -j"$(nproc)"; \
+            elif [ -f CMakeLists.txt ]; then \
+                echo 'Using CMake build system...' && rm -rf build && mkdir -p build && cmake -S . -B build && cmake --build build -j"$(nproc)"; \
+            else \
+                echo 'No Makefile or CMakeLists.txt found' && exit 2; \
+            fi) >>"$LOGFILE" 2>&1 || {
+            log "Compilation failed. See $LOGFILE for details."
+            echo
+            echo "rAthena compilation failed. Check ${LOGFILE} for compiler output."
+            return 1
+        }
     fi
 
     log "rAthena compiled successfully."
@@ -279,45 +302,50 @@ phase_generate_fluxcp_config() {
     APPFILE="$WEBROOT/application/config/application.php"
     SRVFILE="$WEBROOT/application/config/server.php"
 
-    mkdir -p "$WEBROOT/application/config"
+    # Only attempt sed if files exist. Do not create minimal PHP files that may break FluxCP.
+    if [ -f "$APPFILE" ]; then
+        sed -i "s/'BaseURI'[[:space:]]*=>[[:space:]]*'[^']*'/'BaseURI' => '\/'/g" "$APPFILE" || true
+        sed -i "s/'InstallerPassword'[[:space:]]*=>[[:space:]]*'[^']*'/'InstallerPassword' => 'RyomaHostingPH'/g" "$APPFILE" || true
+        sed -i "s/'SiteTitle'[[:space:]]*=>[[:space:]]*'[^']*'/'SiteTitle' => 'Ragnarok Control Panel'/g" "$APPFILE" || true
+        sed -i "s/'DonationCurrency'[[:space:]]*=>[[:space:]]*'[^']*'/'DonationCurrency' => 'PHP'/g" "$APPFILE" || true
+    else
+        log "Warning: $APPFILE not found — skipping application.php patches."
+    fi
 
-    [ ! -f "$APPFILE" ] && echo "<?php return [];" > "$APPFILE"
-    [ ! -f "$SRVFILE" ] && echo "<?php return [];" > "$SRVFILE"
+    if [ -f "$SRVFILE" ]; then
+        sed -i "s/'ServerName'[[:space:]]*=>[[:space:]]*'[^']*'/'ServerName' => 'RagnaROK'/g" "$SRVFILE" || true
 
-    sed -i "s/'BaseURI'[[:space:]]*=>[[:space:]]*'[^']*'/'BaseURI' => '\/'/g" "$APPFILE"
-    sed -i "s/'InstallerPassword'[[:space:]]*=>[[:space:]]*'[^']*'/'InstallerPassword' => 'RyomaHostingPH'/g" "$APPFILE"
-    sed -i "s/'SiteTitle'[[:space:]]*=>[[:space:]]*'[^']*'/'SiteTitle' => 'Ragnarok Control Panel'/g" "$APPFILE"
-    sed -i "s/'DonationCurrency'[[:space:]]*=>[[:space:]]*'[^']*'/'DonationCurrency' => 'PHP'/g" "$APPFILE"
+        sed -i "/'DbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {\
+            s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/;\
+            s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/;\
+            s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;\
+            s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/;\
+            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/;\
+        }" "$SRVFILE" || true
 
-    sed -i "s/'ServerName'[[:space:]]*=>[[:space:]]*'[^']*'/'ServerName' => 'RagnaROK'/g" "$SRVFILE"
+        sed -i "/'LogsDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {\
+            s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/;\
+            s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;\
+            s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/;\
+            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_LOGS}'/;\
+        }" "$SRVFILE" || true
 
-    sed -i "/'DbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
-        s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/
-        s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/
-        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/
-        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/
-        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/
-    }" "$SRVFILE"
+        sed -i "/'WebDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {\
+            s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/;\
+            s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/;\
+            s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/;\
+            s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/;\
+        }" "$SRVFILE" || true
 
-    sed -i "/'LogsDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
-        s/'Convert'[[:space:]]*=>[[:space:]]*'[^']*'/'Convert' => 'utf8'/
-        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/
-        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/
-        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_LOGS}'/
-    }" "$SRVFILE"
+    else
+        log "Warning: $SRVFILE not found — skipping server.php patches."
+    fi
 
-    sed -i "/'WebDbConfig'[[:space:]]*=>[[:space:]]*array(/,/^[[:space:]]*),/ {
-        s/'Hostname'[[:space:]]*=>[[:space:]]*'[^']*'/'Hostname' => '127.0.0.1'/
-        s/'Username'[[:space:]]*=>[[:space:]]*'[^']*'/'Username' => '${DB_USER}'/
-        s/'Password'[[:space:]]*=>[[:space:]]*'[^']*'/'Password' => '${DB_PASS}'/
-        s/'Database'[[:space:]]*=>[[:space:]]*'[^']*'/'Database' => '${DB_RAGNAROK}'/
-    }" "$SRVFILE"
+    chown -R www-data:www-data "$WEBROOT" || true
+    usermod -a -G www-data rathena 2>/dev/null || true
+    chmod -R 0774 "$WEBROOT" 2>/dev/null || true
 
-    chown -R www-data:www-data "$WEBROOT"
-    usermod -a -G www-data rathena
-    chmod -R 0774 "$WEBROOT"
-
-    log "FluxCP application.php and server.php patched."
+    log "FluxCP config patch attempt finished."
 }
 
 phase_generate_rathena_config(){
@@ -427,7 +455,6 @@ EOF
     "bash -lc '${RATHENA_HOME}/restart_servers_xfce.sh'" \
     "view-refresh" false
 
-  # Uses same make/CMake auto-detection logic
   write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
     "bash -lc 'cd ${RATHENA_INSTALL_DIR} && if [ -f Makefile ]; then make clean && make -j\$(nproc); elif [ -f CMakeLists.txt ]; then rm -rf build && cmake -S . -B build && cmake --build build -j\$(nproc); else echo \"No Makefile or CMakeLists.txt found in ${RATHENA_INSTALL_DIR}\"; fi'" \
     "applications-development" true
@@ -512,8 +539,8 @@ full_install(){
     run_phase "Setup MariaDB"                   phase_setup_mariadb        || { log "Full installer aborted."; return 1; }
     run_phase "Import SQL files"                phase_import_sqls          || { log "Full installer aborted."; return 1; }
     run_phase "Generate FluxCP config"          phase_generate_fluxcp_config || { log "Full installer aborted."; return 1; }
-    run_phase "Generate rAthena config"         phase_generate_rathena_config || { log "Full installer aborted."; return 1; }
     run_phase "Compile rAthena"                 phase_compile_rathena      || { log "Full installer aborted."; return 1; }
+    run_phase "Generate rAthena config"         phase_generate_rathena_config || { log "Full installer aborted."; return 1; }
     run_phase "Create ServerDetails.txt"        phase_create_serverdetails || { log "Full installer aborted."; return 1; }
     run_phase "Create desktop shortcuts"        phase_create_desktop_shortcuts || { log "Full installer aborted."; return 1; }
 
