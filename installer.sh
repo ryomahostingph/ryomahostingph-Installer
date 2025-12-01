@@ -460,24 +460,25 @@ validate_rathena_imports() {
 
 phase_generate_rathena_config(){
     log "Generating rAthena import config files..."
-    local import_dir="$RATHENA_INSTALL_DIR/conf/import"
-    mkdir -p "$import_dir"
+    local import_dir="${RATHENA_INSTALL_DIR}/conf/import"
+    mkdir -p "$import_dir" || { log "ERROR: Failed to create $import_dir"; return 1; }
 
-    local char_conf="$import_dir/char_conf.txt"
-    local map_conf="$import_dir/map_conf.txt"
-    local inter_conf="$import_dir/inter_conf.txt"
-    local db_conf="$import_dir/rathena_db.conf"
+    local char_conf="${import_dir}/char_conf.txt"
+    local map_conf="${import_dir}/map_conf.txt"
+    local inter_conf="${import_dir}/inter_conf.txt"
+    local db_conf="${import_dir}/rathena_db.conf"
 
-    if [ -z "$USERID" ] && [ -f "$char_conf" ]; then
+    # Reuse existing char/map userid/pass if present and USERID is empty
+    if [ -z "${USERID:-}" ] && [ -f "$char_conf" ]; then
         USERID="$(sed -n 's/^userid:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
         USERPASS="$(sed -n 's/^passwd:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
     fi
 
-    if [ -n "$USERID" ] && [ -n "$USERPASS" ]; then
+    if [ -n "${USERID:-}" ] && [ -n "${USERPASS:-}" ]; then
         log "Reusing existing server-to-server credentials from $CRED_FILE"
     else
-        [ -z "$USERID" ]   && USERID="$(tr -dc 'A-Za-z' </dev/urandom | head -c6 || echo s1)"
-        [ -z "$USERPASS" ] && USERPASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8 || echo p1)"
+        [ -z "${USERID:-}" ]   && USERID="$(tr -dc 'A-Za-z' </dev/urandom | head -c6 || echo s1)"
+        [ -z "${USERPASS:-}" ] && USERPASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c8 || echo p1)"
         log "Generated new server-to-server credentials"
     fi
 
@@ -497,6 +498,7 @@ passwd: ${USERPASS}
 map_ip: ${SERVER_IP}
 EOF
 
+    # --- inter_conf.txt stays EXACTLY as you wrote it ---
     cat > "$inter_conf" <<EOF
 login_server_id: ${DB_USER}
 login_server_pw: ${DB_PASS}
@@ -517,6 +519,7 @@ log_db_id: ${DB_USER}
 log_db_pw: ${DB_PASS}
 log_db_db: ${DB_LOGS}
 EOF
+    # ---------------------------------------------------
 
     cat > "$db_conf" <<EOF
 db_ip="127.0.0.1"
@@ -527,38 +530,14 @@ db_logs="${DB_LOGS}"
 db_fluxcp="${DB_FLUXCP}"
 EOF
 
-    chown -R "${RATHENA_USER}:${RATHENA_USER}" "$import_dir"
+    chown -R "${RATHENA_USER}:${RATHENA_USER}" "$import_dir" 2>/dev/null || true
     log "rAthena import config generated."
 
     save_creds
     validate_rathena_imports "$import_dir"
-}
-
-phase_validate_rathena_setup(){
-    log "Running post-compile rAthena setup validation..."
-
-    local import_dir="$RATHENA_INSTALL_DIR/conf/import"
-    if [ ! -d "$import_dir" ]; then
-        log "WARNING: rAthena import directory missing at ${import_dir}"
-        echo "WARNING: rAthena import directory is missing."
-    else
-        validate_rathena_imports "$import_dir"
-    fi
-
-    local bin_dir="$RATHENA_INSTALL_DIR"
-    [ -d "$RATHENA_INSTALL_DIR/build" ] && bin_dir="$RATHENA_INSTALL_DIR/build"
-
-    local missing=0
-    for s in login-server char-server map-server; do
-        if ! find "$bin_dir" -maxdepth 2 -type f -name "$s" -perm -u+x 2>/dev/null | head -n1 | grep -q .; then
-            log "WARNING: server binary '$s' not found/executable in ${bin_dir}"
-            missing=1
-        fi
-    done
-
-    [ $missing -ne 0 ] && echo "WARNING: One or more rAthena server binaries missing." || log "rAthena server binaries OK."
     return 0
 }
+
 
 phase_generate_fluxcp_config(){
     log "Patching FluxCP application.php and servers.php in /config ..."
