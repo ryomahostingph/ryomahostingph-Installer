@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # rAthena auto-installer with interactive menu, spinner, strict phase error handling,
-# post-compile config + validation, and FluxCP patching for /config layout.
+# post-compile config + validation, FluxCP patching (/config), multi-window VNC autostart,
+# and hardened ownership/permissions to prevent common errors.
+
 set -uo pipefail
 
 # ================== VARIABLES ==================
@@ -42,6 +44,49 @@ log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOGFILE"; }
 cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
 apt_install(){ apt install -y --no-install-recommends "$@"; }
 
+# ================== PERMISSION / OWNERSHIP HELPERS ==================
+ensure_user_owns() {
+    local path="$1"
+    [ -e "$path" ] || return 0
+    chown -R "${RATHENA_USER}:${RATHENA_USER}" "$path" >>"$LOGFILE" 2>&1 || true
+}
+
+ensure_exec() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    chmod +x "$file" >>"$LOGFILE" 2>&1 || true
+}
+
+ensure_dir() {
+    local dir="$1"
+    mkdir -p "$dir" >>"$LOGFILE" 2>&1 || true
+}
+
+ensure_flux_perms() {
+    if [ -d "$WEBROOT" ]; then
+        chown -R www-data:www-data "$WEBROOT" >>"$LOGFILE" 2>&1 || true
+        chmod -R 0775 "$WEBROOT" >>"$LOGFILE" 2>&1 || true
+        usermod -a -G www-data "$RATHENA_USER" 2>/dev/null || true
+    fi
+}
+
+ensure_rathena_perms() {
+    if [ -d "$RATHENA_INSTALL_DIR" ]; then
+        ensure_user_owns "$RATHENA_INSTALL_DIR"
+        find "$RATHENA_INSTALL_DIR" -maxdepth 2 -type f \
+            \( -name "*server" -o -name "*.sh" \) \
+            -exec chmod +x {} \; >>"$LOGFILE" 2>&1 || true
+    fi
+}
+
+ensure_desktop_perms() {
+    local d="${RATHENA_HOME}/Desktop"
+    ensure_dir "$d"
+    ensure_user_owns "$d"
+    find "$d" -maxdepth 1 -type f -name "*.desktop" -exec chmod +x {} \; \
+        >>"$LOGFILE" 2>&1 || true
+}
+
 # ================== CREDENTIAL SAVE HELPER ==================
 save_creds() {
     cat > "$CRED_FILE" <<EOF
@@ -81,13 +126,11 @@ if [ -f "$CRED_FILE" ]; then
     source "$CRED_FILE" || true
 fi
 
-# If no pass after load (or file missing), generate
 if [ -z "${DB_PASS:-}" ]; then
     log "No usable DB password found. Generating new DB password..."
     DB_PASS="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c16 || echo 'ChangeMe123')"
 fi
 
-# Ensure USERID/USERPASS defined even if CRED_FILE didn't contain them
 USERID="${USERID:-}"
 USERPASS="${USERPASS:-}"
 
@@ -190,16 +233,24 @@ EOF
     # ---- Server control scripts (MULTI-WINDOW XFCE, CMake aware) ----
     cat > "${RATHENA_HOME}/start_servers_xfce.sh" <<'BASH'
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 RATHENA_HOME="/home/rathena"
 BASE="$RATHENA_HOME/Desktop/rathena"
 BIN="$BASE"
 [ -x "$BASE/build/login-server" ] && BIN="$BASE/build"
 
+if [ ! -d "$BIN" ]; then
+  echo "rAthena bin dir missing: $BIN"
+  exit 1
+fi
+
+# Heal perms before launch
+chown -R rathena:rathena "$BASE" >/dev/null 2>&1 || true
+chmod +x "$BIN/"*server >/dev/null 2>&1 || true
+
 cd "$BIN"
 
-# Prefer xfce4-terminal; fallback to xterm
 TERM_BIN="xfce4-terminal"
 command -v xfce4-terminal >/dev/null 2>&1 || TERM_BIN="xterm"
 
@@ -208,7 +259,6 @@ open_win() {
   local cmd="$2"
 
   if [ "$TERM_BIN" = "xfce4-terminal" ]; then
-    # --hold keeps the window open so it stays visible in VNC
     nohup xfce4-terminal --title="$title" --hold \
       --command "bash -lc '$cmd'" >/dev/null 2>&1 &
   else
@@ -217,31 +267,24 @@ open_win() {
   fi
 }
 
-# Avoid duplicates if already running
 pgrep -f login-server >/dev/null 2>&1 || open_win "rAthena Login Server" "./login-server"
 pgrep -f char-server  >/dev/null 2>&1 || open_win "rAthena Char Server"  "./char-server"
 pgrep -f map-server   >/dev/null 2>&1 || open_win "rAthena Map Server"   "./map-server"
 
-# 4th window: show apache/FluxCP log in real-time (your "web server window")
-open_win "FluxCP / Web Server Log" "sudo journalctl -fu apache2"
-
+open_win "FluxCP / Web Server Log" "journalctl -fu apache2"
 BASH
     chmod +x "${RATHENA_HOME}/start_servers_xfce.sh"
     chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/start_servers_xfce.sh"
 
-
     cat > "${RATHENA_HOME}/stop_servers_xfce.sh" <<'BASH'
 #!/usr/bin/env bash
 pkill -f login-server || true
-pkill -f char-server || true
-pkill -f map-server || true
-
-# close the apache log tail window
+pkill -f char-server  || true
+pkill -f map-server   || true
 pkill -f "journalctl -fu apache2" || true
 BASH
     chmod +x "${RATHENA_HOME}/stop_servers_xfce.sh"
     chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/stop_servers_xfce.sh"
-
 
     cat > "${RATHENA_HOME}/restart_servers_xfce.sh" <<'BASH'
 #!/usr/bin/env bash
@@ -253,8 +296,7 @@ BASH
     chmod +x "${RATHENA_HOME}/restart_servers_xfce.sh"
     chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/restart_servers_xfce.sh"
 
-
-    # ---- Autostart rAthena windows whenever XFCE/VNC session starts ----
+    # ---- Autostart when XFCE/VNC starts ----
     local AUTOSTART_DIR="${RATHENA_HOME}/.config/autostart"
     mkdir -p "$AUTOSTART_DIR"
 
@@ -269,20 +311,21 @@ EOF
 
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "${AUTOSTART_DIR}"
 
-
     # Enable VNC template if present
     if systemctl list-unit-files 2>/dev/null | grep -q '^vncserver@'; then
         systemctl enable --now vncserver@1.service 2>/dev/null || true
     fi
 
+    # Defensive perms
+    ensure_user_owns "$RATHENA_HOME"
+    ensure_desktop_perms
+
     log "User ${RATHENA_USER} prepared with multi-window autostart."
 }
-
 
 phase_configure_phpmyadmin(){
     log "Configuring phpMyAdmin..."
 
-    # Enable PHP module for whichever version exists
     for mod in /etc/apache2/mods-available/php*.load; do
         [ -f "$mod" ] || continue
         a2enmod "$(basename "$mod" .load)" >>"$LOGFILE" 2>&1 || true
@@ -295,8 +338,6 @@ phase_configure_phpmyadmin(){
         return 0
     fi
 
-    # ---- Write Apache alias/config for phpMyAdmin ----
-    # SECURITY DEFAULT: localhost-only. Comment out Require ip line if you want public access.
     rm -f /etc/apache2/conf-available/phpmyadmin.conf
     cat > /etc/apache2/conf-available/phpmyadmin.conf <<'EOF'
 Alias /phpmyadmin /usr/share/phpmyadmin
@@ -313,26 +354,19 @@ Alias /phpmyadmin /usr/share/phpmyadmin
         # Require ip YOUR.PUBLIC.IP.HERE
     </RequireAny>
 </Directory>
-
 EOF
 
-    # Enable config
     a2enconf phpmyadmin >>"$LOGFILE" 2>&1 || true
-
-    # Enable rewrite (harmless, useful for web apps)
     a2enmod rewrite >>"$LOGFILE" 2>&1 || true
 
-    # Reload Apache safely
     apache2ctl -t >>"$LOGFILE" 2>&1 || { log "Apache config test failed"; return 1; }
     systemctl reload apache2 >>"$LOGFILE" 2>&1 || systemctl restart apache2 >>"$LOGFILE" 2>&1 || true
 
-    # Permissions
     chown -R www-data:www-data /usr/share/phpmyadmin
 
     log "phpMyAdmin configured at http://localhost/phpmyadmin"
-    log "NOTE: Access is locked to localhost by default (Require ip 127.0.0.1 ::1)."
+    log "NOTE: Access is locked to localhost by default."
 }
-
 
 phase_clone_repos(){
     log "Cloning rAthena..."
@@ -344,8 +378,9 @@ phase_clone_repos(){
         su - "$RATHENA_USER" -s /bin/bash -c "git clone --depth 1 '$RATHENA_REPO' '$RATHENA_INSTALL_DIR'" >>"$LOGFILE" 2>&1 || return 1
     fi
 
+    ensure_rathena_perms
+
     log "Cloning FluxCP into ${WEBROOT}..."
-    # safer wipe: backup existing webroot content first
     if [ -d "$WEBROOT" ] && [ "$(ls -A "$WEBROOT" 2>/dev/null | wc -l)" -gt 0 ]; then
         local backup="${STATE_DIR}/webroot_backup_$(date +%F_%H%M%S)"
         mkdir -p "$backup"
@@ -355,7 +390,8 @@ phase_clone_repos(){
     fi
 
     git clone --depth 1 "$FLUX_REPO" "$WEBROOT" >>"$LOGFILE" 2>&1 || return 1
-    chown -R www-data:www-data "$WEBROOT"
+    ensure_flux_perms
+
     log "Repos cloned."
 }
 
@@ -383,7 +419,7 @@ phase_compile_rathena() {
 
     if [ ! -d "$RATHENA_INSTALL_DIR" ]; then
         log "rAthena directory not found at ${RATHENA_INSTALL_DIR}."
-        echo "rAthena source directory not found. The clone step may have failed or been skipped."
+        echo "rAthena source directory not found."
         return 1
     fi
 
@@ -406,11 +442,12 @@ mkdir -p build
 cmake -S . -B build
 cmake --build build -j\$(nproc)
 " >>"$LOGFILE" 2>&1 || return 1
-
     else
         log "Neither Makefile nor CMakeLists.txt found – cannot compile."
         return 1
     fi
+
+    ensure_rathena_perms
 
     log "rAthena compiled successfully."
     echo "rAthena compiled successfully."
@@ -418,8 +455,6 @@ cmake --build build -j\$(nproc)
 
 phase_import_sqls(){
     log "Importing SQL files from sql-files..."
-
-    # ✅ use installer variable, not a hard-coded path
     local SQL_DIR="${RATHENA_INSTALL_DIR}/sql-files"
 
     if [ ! -d "$SQL_DIR" ]; then
@@ -462,7 +497,6 @@ phase_import_sqls(){
     fi
 }
 
-
 # ---------- validation helper ----------
 validate_rathena_imports() {
     local import_dir="$1"
@@ -474,7 +508,6 @@ validate_rathena_imports() {
     log "Validating rAthena import configs in ${import_dir}..."
 
     local warn=0
-
     for f in "$char_conf" "$map_conf" "$inter_conf" "$db_conf"; do
         if [ ! -f "$f" ]; then
             log "WARNING: Missing import config file: $f"
@@ -526,7 +559,6 @@ phase_generate_rathena_config(){
     local inter_conf="${import_dir}/inter_conf.txt"
     local db_conf="${import_dir}/rathena_db.conf"
 
-    # Reuse existing char/map userid/pass if present and USERID is empty
     if [ -z "${USERID:-}" ] && [ -f "$char_conf" ]; then
         USERID="$(sed -n 's/^userid:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
         USERPASS="$(sed -n 's/^passwd:[[:space:]]*\([^[:space:]]\+\).*$/\1/p' "$char_conf" | head -n1)"
@@ -556,7 +588,6 @@ passwd: ${USERPASS}
 map_ip: ${SERVER_IP}
 EOF
 
-    # --- inter_conf.txt stays EXACTLY as you wrote it ---
     cat > "$inter_conf" <<EOF
 login_server_id: ${DB_USER}
 login_server_pw: ${DB_PASS}
@@ -577,7 +608,6 @@ log_db_id: ${DB_USER}
 log_db_pw: ${DB_PASS}
 log_db_db: ${DB_LOGS}
 EOF
-    # ---------------------------------------------------
 
     cat > "$db_conf" <<EOF
 db_ip="127.0.0.1"
@@ -589,13 +619,12 @@ db_fluxcp="${DB_FLUXCP}"
 EOF
 
     chown -R "${RATHENA_USER}:${RATHENA_USER}" "$import_dir" 2>/dev/null || true
-    log "rAthena import config generated."
 
     save_creds
     validate_rathena_imports "$import_dir"
+    log "rAthena import config generated."
     return 0
 }
-
 
 phase_generate_fluxcp_config(){
     log "Patching FluxCP application.php and servers.php in /config ..."
@@ -604,21 +633,17 @@ phase_generate_fluxcp_config(){
     local APPFILE="$FLUX_CFG_DIR/application.php"
     local SRVFILE="$FLUX_CFG_DIR/servers.php"
 
-    # Copy .dist if they exist and real configs missing
     [ ! -f "$APPFILE" ] && [ -f "${APPFILE}.dist" ] && cp "${APPFILE}.dist" "$APPFILE"
     [ ! -f "$SRVFILE" ] && [ -f "${SRVFILE}.dist" ] && cp "${SRVFILE}.dist" "$SRVFILE"
 
-    # Safety fallback
     [ ! -f "$APPFILE" ] && echo "<?php return array();" > "$APPFILE"
     [ ! -f "$SRVFILE" ] && echo "<?php return array();" > "$SRVFILE"
 
-    # ---------------- application.php patches ----------------
     sed -i -E "s|('BaseURI'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'/'|g" "$APPFILE"
     sed -i -E "s|('InstallerPassword'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'RyomaHostingPH'|g" "$APPFILE"
     sed -i -E "s|('SiteTitle'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'Ragnarok Control Panel'|g" "$APPFILE"
     sed -i -E "s|('DonationCurrency'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'PHP'|g" "$APPFILE"
 
-    # ---------------- servers.php patches ----------------
     sed -i -E "s|('ServerName'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'RagnaROK'|g" "$SRVFILE"
 
     sed -i -E "/'DbConfig'[[:space:]]*=>[[:space:]]*array\(/,/^[[:space:]]*\),/ {
@@ -644,7 +669,6 @@ phase_generate_fluxcp_config(){
         s|('Database'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'${DB_FLUXCP}'|g
     }" "$SRVFILE"
 
-    # ---------------- LoginServer patches / insert ----------------
     if grep -q "'LoginServer'[[:space:]]*=>[[:space:]]*array" "$SRVFILE"; then
         sed -i -E "/'LoginServer'[[:space:]]*=>[[:space:]]*array\(/,/^[[:space:]]*\),/ {
             s|('Address'[[:space:]]*=>[[:space:]]*)'[^']*'|\1'127.0.0.1'|g
@@ -662,27 +686,20 @@ phase_generate_fluxcp_config(){
 " "$SRVFILE"
     fi
 
-    # ---- Post-patch validation (fail phase if missed) ----
     grep -q "'BaseURI'[[:space:]]*=>[[:space:]]*'/'" "$APPFILE" || { log "ERROR: BaseURI patch failed"; return 1; }
     grep -q "'InstallerPassword'[[:space:]]*=>[[:space:]]*'RyomaHostingPH'" "$APPFILE" || { log "ERROR: InstallerPassword patch failed"; return 1; }
     grep -q "'DonationCurrency'[[:space:]]*=>[[:space:]]*'PHP'" "$APPFILE" || { log "ERROR: DonationCurrency patch failed"; return 1; }
     grep -q "'Username'[[:space:]]*=>[[:space:]]*'${DB_USER}'" "$SRVFILE" || { log "ERROR: DbConfig Username patch failed"; return 1; }
 
-    chown -R www-data:www-data "$WEBROOT"
-    usermod -a -G www-data "$RATHENA_USER" 2>/dev/null || true
-    chmod -R 0774 "$WEBROOT"
+    ensure_flux_perms
 
     log "FluxCP config patched successfully in $FLUX_CFG_DIR"
 }
 
-
-# NEW: Patch FluxCP ServerDetails.php with DB creds
 phase_patch_fluxcp_serverdetails_php() {
     log "Patching FluxCP ServerDetails.php with DB credentials..."
-
     local DETAILS_PHP="${WEBROOT}/ServerDetails.php"
 
-    # If file doesn't exist, create a minimal one
     if [ ! -f "$DETAILS_PHP" ]; then
         cat > "$DETAILS_PHP" <<'PHP'
 <?php
@@ -708,6 +725,7 @@ PHP
     grep -q "${DB_USER}" "$DETAILS_PHP" || { log "ERROR: ServerDetails.php patch failed"; return 1; }
 
     chown www-data:www-data "$DETAILS_PHP"
+    chmod 0644 "$DETAILS_PHP" 2>/dev/null || true
     log "ServerDetails.php patched successfully."
 }
 
@@ -786,7 +804,6 @@ EOF
     "bash -lc '${RATHENA_HOME}/restart_servers_xfce.sh'" \
     "view-refresh" false
 
-  # CMake-aware recompile shortcut
   write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
     "bash -lc 'cd ${RATHENA_INSTALL_DIR} && if [ -f Makefile ]; then make clean && make -j\$(nproc); elif [ -f CMakeLists.txt ]; then rm -rf build && cmake -S . -B build && cmake --build build -j\$(nproc); else echo \"No Makefile or CMakeLists.txt found in ${RATHENA_INSTALL_DIR}\"; fi'" \
     "applications-development" true
@@ -807,6 +824,7 @@ EOF
     "bash -lc 'mysqldump -u ${DB_USER} -p\"${DB_PASS}\" ${DB_RAGNAROK} > ${RATHENA_HOME}/db_backups/ragnarok_\$(date +%F).sql && notify-send \"Backup complete\"'" \
     "document-save" false
 
+  ensure_desktop_perms
   log "Desktop shortcuts created."
 }
 
@@ -830,7 +848,6 @@ phase_clean_all(){
     rm -rf "$RATHENA_HOME/.config/autostart"
     rm -rf "$RATHENA_HOME/.vnc"
 
-    # SAFE CLEAN: DO NOT remove $CRED_FILE
     log "Safe clean enabled: keeping credentials at $CRED_FILE"
 
     if cmd_exists mariadb; then
@@ -845,7 +862,7 @@ SQL
         log "MariaDB not installed or not found; skipping DB drop."
     fi
 
-    log "Clean complete. All rAthena files, databases, and configs removed (credentials preserved)."
+    log "Clean complete."
 }
 
 phase_regenerate_db_password(){
@@ -866,6 +883,12 @@ SQL
     log "DB password regenerated."
 }
 
+# ============== SAFE VALIDATION STUB (prevents crash) ==============
+phase_validate_rathena_setup(){
+    log "Validation phase not implemented in this installer. Skipping."
+    return 0
+}
+
 # ================== FULL INSTALLER ==================
 full_install(){
     log "Starting full installer..."
@@ -880,9 +903,7 @@ full_install(){
     run_phase "Import SQL files"               phase_import_sqls              || { log "Full installer aborted."; return 1; }
     run_phase "Generate FluxCP config"         phase_generate_fluxcp_config   || { log "Full installer aborted."; return 1; }
     run_phase "Patch FluxCP ServerDetails.php" phase_patch_fluxcp_serverdetails_php || { log "Full installer aborted."; return 1; }
-
     run_phase "Compile rAthena"                phase_compile_rathena          || { log "Full installer aborted."; return 1; }
-
     run_phase "Create ServerDetails.txt"       phase_create_serverdetails     || { log "Full installer aborted."; return 1; }
     run_phase "Create desktop shortcuts"       phase_create_desktop_shortcuts || { log "Full installer aborted."; return 1; }
     run_phase "Generate rAthena config"        phase_generate_rathena_config  || { log "Full installer aborted."; return 1; }
@@ -916,7 +937,6 @@ while true; do
   echo "===================================================="
   read -rp "Choose an option [1-9]: " choice
 
-
   case "$choice" in
     1) full_install ;;
     2) run_phase "Clean previous install"         phase_clean_all ;;
@@ -929,5 +949,4 @@ while true; do
     9) echo "Exiting."; exit 0 ;;
     *) echo "Invalid choice."; read -rp "Press Enter to continue..." _ ;;
   esac
-
 done
