@@ -267,11 +267,13 @@ open_win() {
   fi
 }
 
+
 pgrep -f login-server >/dev/null 2>&1 || open_win "rAthena Login Server" "./login-server"
 pgrep -f char-server  >/dev/null 2>&1 || open_win "rAthena Char Server"  "./char-server"
-pgrep -f map-server   >/dev/null 2>&1 || open_win "rAthena Map Server"   "./map-server"
-
+pgrep -f map-server   >/dev/null 2>&1 || open_win "rAthena Map Server (GDB)" "gdb -ex=r --args ./map-server"
+pgrep -f web-server   >/dev/null 2>&1 || open_win "rAthena Web Server" "./web-server start"
 open_win "FluxCP / Web Server Log" "journalctl -fu apache2"
+
 BASH
     chmod +x "${RATHENA_HOME}/start_servers_xfce.sh"
     chown "${RATHENA_USER}:${RATHENA_USER}" "${RATHENA_HOME}/start_servers_xfce.sh"
