@@ -896,7 +896,7 @@ EOF
     "view-refresh" false
 
 write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
-    "bash -lc \"cd /home/rathena/Desktop/rathena && ./configure --enable-packetver=20250604 --enable-web-service --enable-debug=gdb && make clean && make -j\$(nproc) server\"" \
+    "bash -lc \"cd /home/rathena/Desktop/rathena && ./configure --enable-packetver=20250604 --enable-debug=gdb && make clean && make -j\$(nproc) server\"" \
     "applications-development" true
 
 
