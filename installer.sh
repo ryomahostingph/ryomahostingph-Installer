@@ -813,7 +813,7 @@ PHP
 
     grep -q "${DB_USER}" "$DETAILS_PHP" || { log "ERROR: ServerDetails.php patch failed"; return 1; }
 
-    chown www-data:www-data "$DETAILS_PHP"
+    chown www-data:rathena "$DETAILS_PHP"
     chmod 0644 "$DETAILS_PHP" 2>/dev/null || true
     log "ServerDetails.php patched successfully."
 }
@@ -893,9 +893,10 @@ EOF
     "bash -lc '${RATHENA_HOME}/restart_servers_xfce.sh'" \
     "view-refresh" false
 
-  write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
-    "bash -lc 'cd ${RATHENA_INSTALL_DIR} && if [ -f Makefile ]; then make clean && make -j\$(nproc); elif [ -f CMakeLists.txt ]; then rm -rf build && cmake -S . -B build && cmake --build build -j\$(nproc); else echo \"No Makefile or CMakeLists.txt found in ${RATHENA_INSTALL_DIR}\"; fi'" \
+write_desktop "Recompile_rAthena.desktop" "Recompile rAthena" \
+    "bash -lc \"cd /home/rathena/Desktop/rathena && ./configure --enable-packetver=20250604 --enable-web-service --enable-debug=gdb && make clean && make -j\$(nproc) server\"" \
     "applications-development" true
+
 
   write_desktop "Change_VNC_Password.desktop" "Change VNC Password" \
     "bash -lc 'vncpasswd'" \
